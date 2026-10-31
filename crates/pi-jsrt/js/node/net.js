@@ -1,5 +1,5 @@
-// node:net — TCP sockets and servers over tokio (ops/net.rs). Unix domain sockets and IPC
-// pipes are not supported.
+// node:net — TCP sockets/servers and Unix-domain clients over tokio (ops/net.rs).
+// Unix-domain servers and Windows named pipes are not supported.
 
 const EventEmitter = internal.EventEmitter;
 const Buffer = internal.Buffer;
@@ -7,6 +7,7 @@ const { Duplex } = internal.requireBuiltin("stream");
 
 // id -> Socket | Server
 const handles = new Map();
+let autoSelectFamilyDefault = true;
 
 internal.netEvent = (id, kind, a, b) => {
   const target = handles.get(id);
@@ -15,7 +16,9 @@ internal.netEvent = (id, kind, a, b) => {
 };
 
 function netError(info) {
-  const err = new Error(info.message);
+  const err = Array.isArray(info.errors)
+    ? new AggregateError(info.errors.map(netError), info.message)
+    : new Error(info.message);
   for (const key of ["code", "errno", "syscall", "address", "port"]) {
     if (info[key] !== undefined) err[key] = info[key];
   }
@@ -58,7 +61,8 @@ function normalizeConnectArgs(args) {
     options = { ...first };
     callback = typeof second === "function" ? second : undefined;
   } else if (typeof first === "string" && !/^\d+$/.test(first)) {
-    throw Object.assign(new Error("Unix domain sockets are not supported in pi-jsrt"), { code: "ERR_NOT_SUPPORTED" });
+    options = { path: first };
+    callback = typeof second === "function" ? second : undefined;
   } else {
     options = { port: first };
     if (typeof second === "string") {
@@ -67,9 +71,6 @@ function normalizeConnectArgs(args) {
     } else {
       callback = typeof second === "function" ? second : undefined;
     }
-  }
-  if (options.path !== undefined) {
-    throw Object.assign(new Error("Unix domain sockets are not supported in pi-jsrt"), { code: "ERR_NOT_SUPPORTED" });
   }
   return { options, callback };
 }
@@ -131,16 +132,31 @@ class Socket extends Duplex {
 
   connect(...args) {
     const { options, callback } = normalizeConnectArgs(args);
-    const port = Number(options.port);
-    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    if (options.port === undefined && options.path == null) {
+      throw Object.assign(new TypeError('The "options" or "port" or "path" argument must be specified'), { code: "ERR_MISSING_ARGS" });
+    }
+    const unix = Boolean(options.path);
+    const port = unix ? 0 : Number(options.port ?? 0);
+    if (unix) {
+      if (typeof options.path !== "string") {
+        throw Object.assign(new TypeError(`The "options.path" property must be of type string. Received ${internal.describeReceived(options.path)}`), { code: "ERR_INVALID_ARG_TYPE" });
+      }
+      if (typeof ops.netConnectUnix !== "function") {
+        throw Object.assign(new Error("Unix domain sockets are not supported on this platform"), { code: "ERR_NOT_SUPPORTED" });
+      }
+    } else if (!Number.isInteger(port) || port < 0 || port > 65535) {
       throw Object.assign(new RangeError(`Port should be >= 0 and < 65536. Received ${options.port}.`), { code: "ERR_SOCKET_BAD_PORT" });
+    }
+    const autoSelectFamily = options.autoSelectFamily ?? autoSelectFamilyDefault;
+    if (!unix && typeof autoSelectFamily !== "boolean") {
+      throw Object.assign(new TypeError(`The "options.autoSelectFamily" property must be of type boolean. Received ${internal.describeReceived(autoSelectFamily)}`), { code: "ERR_INVALID_ARG_TYPE" });
     }
     if (callback) this.once("connect", callback);
     if (options.timeout) this.setTimeout(options.timeout);
     this.connecting = true;
     this._loop.activate();
     internal.dcPublish?.("net.client.socket", { socket: this });
-    const id = ops.netConnect(String(options.host ?? "localhost"), port);
+    const id = unix ? ops.netConnectUnix(options.path) : ops.netConnect(String(options.host ?? "localhost"), port, autoSelectFamily);
     this._id = id;
     handles.set(id, this);
     return this;
@@ -202,6 +218,18 @@ class Socket extends Duplex {
     if (this._id !== undefined && !this.connecting) ops.netEnd(this._id);
     else this.once("connect", () => ops.netEnd(this._id));
     callback();
+  }
+
+  _emitClose() {
+    if (!this._writableState.finished && !this._readableState.destroyed) return;
+    this._emitCloseW();
+  }
+
+  _emitCloseW() {
+    if (this._writableState.closed) return;
+    this._writableState.closed = true;
+    this._readableState.closed = true;
+    this.emit("close", Boolean(this.errored));
   }
 
   _destroy(err, callback) {
@@ -439,8 +467,13 @@ const net = {
   isIP,
   isIPv4,
   isIPv6,
-  getDefaultAutoSelectFamily: () => false,
-  setDefaultAutoSelectFamily() {},
+  getDefaultAutoSelectFamily: () => autoSelectFamilyDefault,
+  setDefaultAutoSelectFamily(value) {
+    if (typeof value !== "boolean") {
+      throw Object.assign(new TypeError(`The "value" argument must be of type boolean. Received ${internal.describeReceived(value)}`), { code: "ERR_INVALID_ARG_TYPE" });
+    }
+    autoSelectFamilyDefault = value;
+  },
   BlockList: class BlockList {
     constructor() {
       this.rules = [];
