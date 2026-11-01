@@ -53,7 +53,10 @@ async fn require_of_sync_esm_while_an_async_module_graph_is_evaluating() {
     let rt = runtime(root);
     let ns = rt.import("./entry.mjs").await.unwrap();
     let rt_value = ns.get("default").await.unwrap();
-    assert_eq!(rt_value, json!({ "value": "fallback", "viaRequire": "plain-esm" }));
+    assert_eq!(
+        rt_value,
+        json!({ "value": "fallback", "viaRequire": "plain-esm" })
+    );
 }
 
 #[tokio::test]
@@ -78,15 +81,26 @@ async fn require_of_esm_does_not_run_queued_microtasks() {
         .await
         .unwrap();
     let order: Value = serde_json::from_str(order.as_str().unwrap()).unwrap();
-    assert_eq!(order, json!(["plain=plain-esm", "after-require", "microtask"]));
+    assert_eq!(
+        order,
+        json!(["plain=plain-esm", "after-require", "microtask"])
+    );
 }
 
 #[tokio::test]
 async fn require_of_esm_graph_with_top_level_await_throws_err_require_async_module() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "tla.mjs", "globalThis.tlaRan = true;\nawait 0;\nexport const value = 1;\n");
-    write(root, "imports-tla.mjs", "export { value } from './tla.mjs';\n");
+    write(
+        root,
+        "tla.mjs",
+        "globalThis.tlaRan = true;\nawait 0;\nexport const value = 1;\n",
+    );
+    write(
+        root,
+        "imports-tla.mjs",
+        "export { value } from './tla.mjs';\n",
+    );
     let rt = runtime(root);
     for target in ["./tla.mjs", "./imports-tla.mjs"] {
         let got = rt
@@ -134,7 +148,10 @@ export const result = r;
     let rt = runtime(root);
     let ns = rt.import("./cycle-a.mjs").await.unwrap();
     let got = ns.get("result").await.unwrap();
-    assert_eq!(got, json!({ "code": "ERR_REQUIRE_CYCLE_MODULE", "name": "Error" }));
+    assert_eq!(
+        got,
+        json!({ "code": "ERR_REQUIRE_CYCLE_MODULE", "name": "Error" })
+    );
 }
 
 #[tokio::test]
@@ -162,14 +179,21 @@ async fn require_of_esm_rethrows_its_evaluation_error_every_time() {
         .unwrap();
     let got: Value = serde_json::from_str(got.as_str().unwrap()).unwrap();
     // A failed require() is a thrown error, not also an unhandled promise rejection.
-    assert_eq!(got, json!({ "out": ["boom at eval", "boom at eval"], "unhandled": [] }));
+    assert_eq!(
+        got,
+        json!({ "out": ["boom at eval", "boom at eval"], "unhandled": [] })
+    );
 }
 
 #[tokio::test]
 async fn require_of_already_evaluated_esm_returns_the_same_namespace() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "counter.mjs", "globalThis.evals = (globalThis.evals ?? 0) + 1;\nexport const n = 42;\n");
+    write(
+        root,
+        "counter.mjs",
+        "globalThis.evals = (globalThis.evals ?? 0) + 1;\nexport const n = 42;\n",
+    );
     write(
         root,
         "entry.mjs",

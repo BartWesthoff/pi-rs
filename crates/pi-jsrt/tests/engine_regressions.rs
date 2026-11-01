@@ -603,7 +603,11 @@ async fn deep_recursion_throws_a_catchable_range_error_and_unwinds() {
         "#;
         let value = rt.eval(wrapper.replace("BODY", body)).await.unwrap();
         let entry = json!([true, "Maximum call stack size exceeded", true]);
-        assert_eq!(value, json!([[entry.clone(), entry.clone(), entry], 2000]), "{wrapper}");
+        assert_eq!(
+            value,
+            json!([[entry.clone(), entry.clone(), entry], 2000]),
+            "{wrapper}"
+        );
     }
 }
 
@@ -614,10 +618,26 @@ async fn deep_recursion_throws_a_catchable_range_error_and_unwinds() {
 async fn import_after_async_graph_settles_does_not_wait_on_evaluated_modules() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "tla.mjs", "await Promise.resolve();\nexport const v = 1;\n");
-    write(root, "mid.mjs", "import { v } from './tla.mjs';\nexport const w = v + 1;\n");
-    write(root, "entry.mjs", "import { w } from './mid.mjs';\nexport default w;\n");
-    write(root, "late.mjs", "import { w } from './mid.mjs';\nexport const z = w + 1;\n");
+    write(
+        root,
+        "tla.mjs",
+        "await Promise.resolve();\nexport const v = 1;\n",
+    );
+    write(
+        root,
+        "mid.mjs",
+        "import { v } from './tla.mjs';\nexport const w = v + 1;\n",
+    );
+    write(
+        root,
+        "entry.mjs",
+        "import { w } from './mid.mjs';\nexport default w;\n",
+    );
+    write(
+        root,
+        "late.mjs",
+        "import { w } from './mid.mjs';\nexport const z = w + 1;\n",
+    );
     let rt = JsRuntime::new(RuntimeOptions {
         cwd: Some(root.to_path_buf()),
         ..Default::default()
