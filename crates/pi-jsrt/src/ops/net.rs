@@ -1,4 +1,4 @@
-//! TCP ops backing `node:net` (and the HTTP server/client built on it in `js/node/http.js`).
+//! TCP and Unix-client ops backing `node:net` (and the HTTP server/client built on it in `js/node/http.js`).
 //!
 //! Listeners and sockets run on tokio. Accepted connections, received data and lifecycle
 //! events are posted back to the JS thread and dispatched through
@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{bytes_arg, bytes_to_js, io_code, object};
+use super::{array, bytes_arg, bytes_to_js, io_code, object};
 use crate::engine::{self, OpFn, Poster, arg_f64, arg_string, js_str, state};
 
 enum SockMsg {
@@ -38,6 +38,7 @@ struct ServerCtl {
 thread_local! {
     static SOCKETS: RefCell<HashMap<u64, SocketCtl>> = RefCell::new(HashMap::new());
     static SERVERS: RefCell<HashMap<u64, ServerCtl>> = RefCell::new(HashMap::new());
+    static CONNECTING: RefCell<HashMap<u64, CancellationToken>> = RefCell::new(HashMap::new());
 }
 
 fn dispatch(ctx: &mut Context, id: u64, args: Vec<JsValue>) {
@@ -80,21 +81,26 @@ fn error_object(ctx: &mut Context, e: &std::io::Error, syscall: &str, address: O
         ("syscall", js_str(syscall)),
     ];
     if let Some((host, port)) = address {
-        message.push_str(&format!(" {host}:{port}"));
+        message.push_str(&format!(" {host}"));
         entries.push(("address", js_str(host)));
-        entries.push(("port", JsValue::from(port)));
+        if port != 0 {
+            message.push_str(&format!(":{port}"));
+            entries.push(("port", JsValue::from(port)));
+        }
     }
     entries.insert(0, ("message", js_str(&message)));
     object(ctx, entries)
 }
 
 /// Start the reader and writer tasks of a connected stream and register it under `id`.
-fn start_socket(tokio: &tokio::runtime::Handle, poster: Poster, id: u64, stream: tokio::net::TcpStream) -> SocketCtl {
-    use std::os::fd::AsRawFd;
+fn start_socket<S>(tokio: &tokio::runtime::Handle, poster: Poster, id: u64, stream: S) -> SocketCtl
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::os::fd::AsRawFd + Unpin + Send + 'static,
+{
     let fd = stream.as_raw_fd();
     let (tx, mut rx) = mpsc::unbounded_channel::<SockMsg>();
     let stop = CancellationToken::new();
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let read_poster = poster.clone();
     let read_stop = stop.clone();
     let read_task = tokio.spawn(async move {
@@ -148,8 +154,8 @@ fn start_socket(tokio: &tokio::runtime::Handle, poster: Poster, id: u64, stream:
                     }
                 }
                 Some(SockMsg::Detach) => {
-                    // Dropping a write half shuts the socket down for every process sharing it.
-                    writer.forget();
+                    // Generic split halves close without shutting down the passed descriptor.
+                    drop(writer);
                     write_stop.cancel();
                     return false;
                 }
@@ -351,39 +357,226 @@ fn op_net_fd(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
     Ok(JsValue::from(fd.unwrap_or(-1)))
 }
 
-/// `ops.netConnect(host, port) -> id`; emits `connect` (with endpoints) or `error`.
+fn lookup_tcp(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let host = std::ffi::CString::new(host).map_err(std::io::Error::other)?;
+    let service = std::ffi::CString::new(port.to_string()).unwrap();
+    // SAFETY: zero initializes addrinfo's scalar fields and nullable pointers.
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    hints.ai_flags = libc::AI_ADDRCONFIG;
+    let mut result = std::ptr::null_mut();
+    // SAFETY: both strings are NUL-terminated; hints and result are valid pointers.
+    let code = unsafe { libc::getaddrinfo(host.as_ptr(), service.as_ptr(), &hints, &mut result) };
+    if code != 0 {
+        return Err(if code == libc::EAI_SYSTEM {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::other(format!("getaddrinfo failed: {code}"))
+        });
+    }
+    let mut addresses = Vec::new();
+    let mut current = result;
+    while !current.is_null() {
+        // SAFETY: getaddrinfo owns a valid linked list until freeaddrinfo below.
+        let info = unsafe { &*current };
+        if !info.ai_addr.is_null() {
+            if info.ai_family == libc::AF_INET
+                && info.ai_addrlen as usize >= std::mem::size_of::<libc::sockaddr_in>()
+            {
+                // SAFETY: the family and length identify a valid sockaddr_in.
+                let addr = unsafe { &*info.ai_addr.cast::<libc::sockaddr_in>() };
+                addresses.push(SocketAddr::new(
+                    std::net::Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()).into(),
+                    u16::from_be(addr.sin_port),
+                ));
+            } else if info.ai_family == libc::AF_INET6
+                && info.ai_addrlen as usize >= std::mem::size_of::<libc::sockaddr_in6>()
+            {
+                // SAFETY: the family and length identify a valid sockaddr_in6.
+                let addr = unsafe { &*info.ai_addr.cast::<libc::sockaddr_in6>() };
+                addresses.push(std::net::SocketAddrV6::new(
+                    std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr),
+                    u16::from_be(addr.sin6_port),
+                    u32::from_be(addr.sin6_flowinfo),
+                    addr.sin6_scope_id,
+                ).into());
+            }
+        }
+        current = info.ai_next;
+    }
+    // SAFETY: result came from this successful getaddrinfo call and is freed once.
+    unsafe { libc::freeaddrinfo(result) };
+    Ok(addresses)
+}
+
+async fn connect_tcp(
+    host: &str,
+    port: u16,
+    auto_select: bool,
+) -> Result<tokio::net::TcpStream, Vec<(String, std::io::Error)>> {
+    let hostname = host.to_owned();
+    let resolved = tokio::task::spawn_blocking(move || lookup_tcp(&hostname, port))
+        .await
+        .map_err(|e| vec![(host.to_string(), std::io::Error::other(e))])?
+        .map_err(|e| vec![(host.to_string(), e)])?;
+    let mut addresses = Vec::new();
+    for address in resolved {
+        if !addresses.contains(&address) { addresses.push(address); }
+    }
+    if addresses.is_empty() {
+        return Err(vec![(host.to_string(), std::io::Error::new(
+            std::io::ErrorKind::InvalidInput, "could not resolve to any addresses"))]);
+    }
+    if auto_select {
+        let first_is_v6 = addresses[0].is_ipv6();
+        let (first, second): (Vec<_>, Vec<_>) = addresses.into_iter()
+            .partition(|a| a.is_ipv6() == first_is_v6);
+        addresses = Vec::with_capacity(first.len() + second.len());
+        for i in 0..first.len().max(second.len()) {
+            if let Some(address) = first.get(i) { addresses.push(*address); }
+            if let Some(address) = second.get(i) { addresses.push(*address); }
+        }
+    } else {
+        addresses.truncate(1);
+    }
+    let mut errors = Vec::new();
+    for (i, address) in addresses.iter().enumerate() {
+        let connect = tokio::net::TcpStream::connect(address);
+        let result = if auto_select && i + 1 < addresses.len() {
+            // shortcut: fixed Node-default timeout; expose timeout tuning when needed.
+            tokio::time::timeout(std::time::Duration::from_millis(250), connect).await
+                .unwrap_or_else(|_| Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT)))
+        } else {
+            connect.await
+        };
+        match result {
+            Ok(stream) => return Ok(stream),
+            Err(e) => errors.push((address.ip().to_string(), e)),
+        }
+    }
+    Err(errors)
+}
+
+/// `ops.netConnect(host, port, autoSelectFamily) -> id`; emits `connect` or `error`.
 fn op_net_connect(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let host = arg_string(args, 0, ctx)?;
     let port = arg_f64(args, 1, ctx)? as u16;
     let host = if host.is_empty() { "localhost".to_string() } else { host };
+    let auto_select = args.get_or_undefined(2).as_boolean().unwrap_or(true);
     let st = state(ctx);
     let id = st.next_id();
     let poster = st.poster();
     let tokio = st.tokio.clone();
+    let stop = CancellationToken::new();
+    CONNECTING.with(|s| s.borrow_mut().insert(id, stop.clone()));
     st.tokio.spawn(async move {
-        match tokio::net::TcpStream::connect((host.as_str(), port)).await {
-            Ok(stream) => {
-                let _ = stream.set_nodelay(true);
-                let local = stream.local_addr().ok();
-                let remote = stream.peer_addr().ok();
-                let poster2 = poster.clone();
-                poster.post(move |ctx| {
+        let result = tokio::select! {
+            biased;
+            _ = stop.cancelled() => None,
+            result = connect_tcp(&host, port, auto_select) => Some(result),
+        };
+        let poster2 = poster.clone();
+        poster.post(move |ctx| {
+            CONNECTING.with(|s| s.borrow_mut().remove(&id));
+            if stop.is_cancelled() {
+                dispatch(ctx, id, vec![js_str("close"), JsValue::from(false)]);
+                return;
+            }
+            match result {
+                Some(Ok(stream)) => {
+                    let _ = stream.set_nodelay(true);
+                    let local = stream.local_addr().ok();
+                    let remote = stream.peer_addr().ok();
                     let ctl = start_socket(&tokio, poster2, id, stream);
                     SOCKETS.with(|s| s.borrow_mut().insert(id, ctl));
                     if let Ok(info) = endpoints(ctx, local, remote) {
                         dispatch(ctx, id, vec![js_str("connect"), info]);
                     }
-                });
-            }
-            Err(e) => {
-                poster.post(move |ctx| {
-                    if let Ok(err) = error_object(ctx, &e, "connect", Some((&host, port))) {
+                }
+                Some(Err(errors)) => {
+                    let code = io_code(&errors[0].1);
+                    let error = errors.iter()
+                        .map(|(address, e)| error_object(ctx, e, "connect", Some((address, port))))
+                        .collect::<JsResult<Vec<_>>>()
+                        .and_then(|mut errors| {
+                            if errors.len() == 1 {
+                                Ok(errors.remove(0))
+                            } else {
+                                let errors = array(ctx, errors);
+                                object(ctx, vec![("message", js_str("")), ("code", js_str(code)), ("errors", errors)])
+                            }
+                        });
+                    if let Ok(err) = error {
                         dispatch(ctx, id, vec![js_str("error"), err]);
-                        dispatch(ctx, id, vec![js_str("close"), JsValue::from(true)]);
                     }
-                });
+                    dispatch(ctx, id, vec![js_str("close"), JsValue::from(true)]);
+                }
+                None => {}
             }
-        }
+        });
+    });
+    Ok(JsValue::from(id as f64))
+}
+
+/// `ops.netConnectUnix(path) -> id`; shares connected-socket I/O with TCP.
+#[cfg(unix)]
+fn op_net_connect_unix(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let path = arg_string(args, 0, ctx)?;
+    let st = state(ctx);
+    let id = st.next_id();
+    let poster = st.poster();
+    let tokio = st.tokio.clone();
+    let stop = CancellationToken::new();
+    CONNECTING.with(|s| s.borrow_mut().insert(id, stop.clone()));
+    st.tokio.spawn(async move {
+        let result = tokio::select! {
+            biased;
+            _ = stop.cancelled() => None,
+            result = tokio::net::UnixStream::connect(&path) => Some(result),
+        };
+        let poster2 = poster.clone();
+        poster.post(move |ctx| {
+            CONNECTING.with(|s| s.borrow_mut().remove(&id));
+            if stop.is_cancelled() {
+                dispatch(ctx, id, vec![js_str("close"), JsValue::from(false)]);
+                return;
+            }
+            match result {
+                Some(Ok(stream)) => {
+                    let ctl = start_socket(&tokio, poster2, id, stream);
+                    SOCKETS.with(|s| s.borrow_mut().insert(id, ctl));
+                    if let Ok(info) = endpoints(ctx, None, None) {
+                        dispatch(ctx, id, vec![js_str("connect"), info]);
+                    }
+                }
+                Some(Err(e)) => {
+                    let code = io_code(&e);
+                    let invalid_path = e.raw_os_error().is_none()
+                        && e.kind() == std::io::ErrorKind::InvalidInput;
+                    let errno = e.raw_os_error().or_else(|| invalid_path.then_some(libc::EINVAL));
+                    // Node includes local-address details when pipe connect fails immediately.
+                    let details = if invalid_path { " - Local (undefined:undefined)" } else { "" };
+                    let mut fields = vec![
+                        ("message", js_str(&format!("connect {code} {path}{details}"))),
+                        ("code", js_str(code)),
+                        ("syscall", js_str("connect")),
+                        ("address", js_str(&path)),
+                    ];
+                    if let Some(errno) = errno {
+                        fields.push(("errno", JsValue::from(-errno)));
+                    }
+                    if let Ok(err) = object(ctx, fields) {
+                        dispatch(ctx, id, vec![js_str("error"), err]);
+                    }
+                    dispatch(ctx, id, vec![js_str("close"), JsValue::from(true)]);
+                }
+                None => {}
+            }
+        });
     });
     Ok(JsValue::from(id as f64))
 }
@@ -419,6 +612,11 @@ fn op_net_detach(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
 
 fn op_net_destroy(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
+    CONNECTING.with(|s| {
+        if let Some(stop) = s.borrow().get(&id) {
+            stop.cancel();
+        }
+    });
     SOCKETS.with(|s| {
         if let Some(c) = s.borrow().get(&id) {
             c.stop.cancel();
@@ -439,13 +637,16 @@ fn op_net_server_close(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
 
 /// Close every listener and socket (runtime shutdown).
 pub(crate) fn teardown(_ctx: &mut Context) {
+    CONNECTING.with(|s| s.borrow_mut().drain().for_each(|(_, stop)| stop.cancel()));
     SERVERS.with(|s| s.borrow_mut().drain().for_each(|(_, c)| c.stop.cancel()));
     SOCKETS.with(|s| s.borrow_mut().drain().for_each(|(_, c)| c.stop.cancel()));
 }
 
 pub(crate) const OPS: &[(&str, usize, OpFn)] = &[
     ("netListen", 2, op_net_listen),
-    ("netConnect", 2, op_net_connect),
+    ("netConnect", 3, op_net_connect),
+    #[cfg(unix)]
+    ("netConnectUnix", 1, op_net_connect_unix),
     ("netWrite", 2, op_net_write),
     ("netEnd", 1, op_net_end),
     ("netDestroy", 1, op_net_destroy),
