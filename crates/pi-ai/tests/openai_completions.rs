@@ -192,3 +192,538 @@ async fn provider_compat_detection_shapes_requests() {
 }
 
 use pi_ai::providers::all::get_builtin_models;
+
+// ---------------------------------------------------------------------------
+// Local llama.cpp server (`llama-server --reasoning-format deepseek`) streams, as served to
+// the `openai-completions` providers of a local models.json.
+// ---------------------------------------------------------------------------
+
+mod mock_http;
+
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+/// A models.json entry for a local llama.cpp model: no `compat`, sampling params, reasoning.
+fn llama_cpp_model(base_url: &str) -> Model {
+    let mut sampling = serde_json::Map::new();
+    sampling.insert("temperature".into(), json!(0.6));
+    sampling.insert("top_p".into(), json!(0.95));
+    Model {
+        id: "lfm3-qad".into(),
+        name: "LFM3".into(),
+        api: "openai-completions".into(),
+        provider: "lfm3-llama".into(),
+        base_url: format!("{base_url}/v1"),
+        reasoning: true,
+        input: vec![ModelInputModality::Text],
+        context_window: 262_144,
+        max_tokens: 4096,
+        sampling_params: Some(sampling),
+        ..Default::default()
+    }
+}
+
+/// One `chat.completion.chunk` exactly as llama.cpp's server frames it.
+fn llama_chunk(delta: Value, finish: Option<&str>) -> Value {
+    json!({
+        "choices": [{"finish_reason": finish, "index": 0, "delta": delta}],
+        "created": 1_793_527_409, "id": "chatcmpl-llama", "model": "lfm3-qad",
+        "system_fingerprint": "b12024-ddf48f85c", "object": "chat.completion.chunk"
+    })
+}
+
+/// llama.cpp's trailing usage chunk: empty `choices`, `usage` and its own `timings`.
+fn llama_usage_chunk(prompt: u64, completion: u64) -> Value {
+    json!({
+        "choices": [], "created": 1_793_527_409, "id": "chatcmpl-llama", "model": "lfm3-qad",
+        "system_fingerprint": "b12024-ddf48f85c", "object": "chat.completion.chunk",
+        "usage": {"completion_tokens": completion, "prompt_tokens": prompt, "total_tokens": prompt + completion,
+                  "prompt_tokens_details": {"cached_tokens": 3}},
+        "timings": {"cache_n": 3, "prompt_n": prompt - 3, "prompt_ms": 211.5, "predicted_n": completion, "predicted_ms": 82.6}
+    })
+}
+
+/// A turn with reasoning, answer text (multi-byte characters included) and two parallel tool
+/// calls whose arguments arrive in pieces.
+fn llama_tool_turn() -> Vec<Value> {
+    vec![
+        llama_chunk(json!({"role": "assistant", "content": null}), None),
+        llama_chunk(json!({"reasoning_content": "Read both "}), None),
+        llama_chunk(json!({"reasoning_content": "files ✓ — café"}), None),
+        llama_chunk(json!({"content": "Reading 📄 now."}), None),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 0, "id": "call_a", "type": "function", "function": {"name": "read", "arguments": ""}}]}),
+            None,
+        ),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "{\"path\":"}}]}),
+            None,
+        ),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "\"héllo.txt\"}"}}]}),
+            None,
+        ),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 1, "id": "call_b", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":"}}]}),
+            None,
+        ),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 1, "function": {"arguments": "\"ls -la\"}"}}]}),
+            None,
+        ),
+        llama_chunk(json!({}), Some("tool_calls")),
+        llama_usage_chunk(120, 40),
+    ]
+}
+
+fn llama_context() -> TranscriptContext {
+    normalize_context(&Context {
+        system_prompt: Some("Be brief.".into()),
+        messages: vec![Message::User(UserMessage::new("go", 1))],
+        tools: Some(vec![
+            Tool::new(
+                "read",
+                "Read",
+                json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            ),
+            Tool::new(
+                "bash",
+                "Bash",
+                json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
+            ),
+        ]),
+    })
+}
+
+fn local_options() -> StreamOptions {
+    StreamOptions {
+        api_key: Some("local-key".into()),
+        ..Default::default()
+    }
+}
+
+/// Event types with their text payloads, without the timestamped partial messages.
+fn event_trace(events: &[AssistantMessageEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| match event {
+            AssistantMessageEvent::TextDelta {
+                content_index,
+                delta,
+                ..
+            }
+            | AssistantMessageEvent::ThinkingDelta {
+                content_index,
+                delta,
+                ..
+            }
+            | AssistantMessageEvent::ToolCallDelta {
+                content_index,
+                delta,
+                ..
+            } => {
+                format!("{} {content_index} {delta}", event.type_name())
+            }
+            AssistantMessageEvent::ToolCallEnd {
+                content_index,
+                tool_call,
+                ..
+            } => {
+                format!(
+                    "toolcall_end {content_index} {} {} {:?}",
+                    tool_call.id, tool_call.name, tool_call.arguments
+                )
+            }
+            other => other.type_name().to_string(),
+        })
+        .collect()
+}
+
+/// Split `body` into chunks of `size` bytes, ignoring UTF-8 character boundaries.
+fn split_bytes(body: &str, size: usize) -> Vec<Vec<u8>> {
+    body.as_bytes().chunks(size).map(<[u8]>::to_vec).collect()
+}
+
+#[tokio::test]
+async fn llama_cpp_stream_parses_identically_at_any_byte_split() {
+    let body = openai_sse_body(&llama_tool_turn());
+    let whole = mock_http::MockServer::sequence(vec![mock_http::Response::sse(&body)]).await;
+    let (reference_events, reference) = openai_completions::stream(
+        &llama_cpp_model(&whole.url),
+        &llama_context(),
+        local_options(),
+    )
+    .collect_all()
+    .await;
+    assert_eq!(
+        reference.stop_reason,
+        StopReason::ToolUse,
+        "{:?}",
+        reference.error_message
+    );
+    let thinking = reference.content[0]
+        .as_thinking()
+        .expect("thinking block first");
+    assert_eq!(thinking.thinking, "Read both files ✓ — café");
+    assert_eq!(
+        thinking.thinking_signature.as_deref(),
+        Some("reasoning_content")
+    );
+    assert_eq!(
+        reference.content[1].as_text().expect("text block").text,
+        "Reading 📄 now."
+    );
+    let calls: Vec<&ToolCall> = reference.tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        (calls[0].id.as_str(), calls[0].name.as_str()),
+        ("call_a", "read")
+    );
+    assert_eq!(
+        Value::Object(calls[0].arguments.clone()),
+        json!({"path": "héllo.txt"})
+    );
+    assert_eq!(
+        (calls[1].id.as_str(), calls[1].name.as_str()),
+        ("call_b", "bash")
+    );
+    assert_eq!(
+        Value::Object(calls[1].arguments.clone()),
+        json!({"command": "ls -la"})
+    );
+    assert_eq!(
+        (
+            reference.usage.input,
+            reference.usage.cache_read,
+            reference.usage.output
+        ),
+        (117, 3, 40)
+    );
+    assert_eq!(reference.response_id.as_deref(), Some("chatcmpl-llama"));
+    assert_eq!(
+        reference.response_model, None,
+        "chunk model equals the requested id"
+    );
+    let reference_trace = event_trace(&reference_events);
+
+    for size in [1, 2, 3, 5, 7, 11, 64, 333] {
+        let server = mock_http::MockServer::sequence(vec![mock_http::Response::chunked(
+            200,
+            "text/event-stream",
+            split_bytes(&body, size),
+        )])
+        .await;
+        let (events, message) = openai_completions::stream(
+            &llama_cpp_model(&server.url),
+            &llama_context(),
+            local_options(),
+        )
+        .collect_all()
+        .await;
+        assert_eq!(message.content, reference.content, "split at {size} bytes");
+        assert_eq!(message.usage, reference.usage, "split at {size} bytes");
+        assert_eq!(
+            message.stop_reason,
+            StopReason::ToolUse,
+            "split at {size} bytes: {:?}",
+            message.error_message
+        );
+        assert_eq!(
+            event_trace(&events),
+            reference_trace,
+            "split at {size} bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn llama_cpp_request_shape_for_a_local_model_entry() {
+    let server =
+        mock_http::MockServer::sequence(vec![mock_http::Response::sse(&openai_sse_body(&[
+            llama_chunk(json!({"content": "ok"}), None),
+            llama_chunk(json!({}), Some("stop")),
+        ]))])
+        .await;
+    let options = StreamOptions {
+        reasoning: Some(ThinkingLevel::Medium),
+        max_tokens: Some(4096),
+        ..local_options()
+    };
+    let result =
+        openai_completions::stream_simple(&llama_cpp_model(&server.url), &llama_context(), options)
+            .result()
+            .await;
+    assert_eq!(
+        result.stop_reason,
+        StopReason::Stop,
+        "{:?}",
+        result.error_message
+    );
+    let request = server.request(0);
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(request.header("authorization"), Some("Bearer local-key"));
+    assert_eq!(request.header("accept"), Some("application/json"));
+    // Same body as TS pi 1.4.0 sends for this models.json entry (key order aside).
+    assert_eq!(
+        request.json(),
+        json!({
+            "model": "lfm3-qad",
+            "messages": [{"role": "developer", "content": "Be brief."}, {"role": "user", "content": "go"}],
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "store": false,
+            "max_completion_tokens": 4096,
+            "tools": [
+                {"type": "function", "function": {"name": "read", "description": "Read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+                {"type": "function", "function": {"name": "bash", "description": "Bash", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}
+            ],
+            "reasoning_effort": "medium",
+            "temperature": 0.6,
+            "top_p": 0.95
+        })
+    );
+}
+
+#[tokio::test]
+async fn stream_outlives_the_request_timeout_while_chunks_keep_arriving() {
+    // The SDK timeout covers waiting for the response, not reading the body: a long local
+    // generation that keeps streaming must not be cut off when the total time passes it.
+    let chunks = vec![
+        llama_chunk(json!({"reasoning_content": "slow "}), None),
+        llama_chunk(json!({"content": "one "}), None),
+        llama_chunk(json!({"content": "two "}), None),
+        llama_chunk(json!({"content": "three"}), None),
+        llama_chunk(json!({}), Some("stop")),
+    ];
+    let body: Vec<Vec<u8>> = openai_sse_body(&chunks)
+        .split_inclusive("\n\n")
+        .map(|frame| frame.as_bytes().to_vec())
+        .collect();
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::chunked(200, "text/event-stream", body).with_chunk_delay(150),
+    ])
+    .await;
+    let options = StreamOptions {
+        timeout_ms: Some(400),
+        ..local_options()
+    };
+    let started = Instant::now();
+    let result =
+        openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options)
+            .result()
+            .await;
+    assert!(
+        started.elapsed() > Duration::from_millis(600),
+        "the stream ran past the timeout: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        result.stop_reason,
+        StopReason::Stop,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(result.text(), "one two three");
+}
+
+#[tokio::test]
+async fn request_timeout_covers_waiting_for_the_response() {
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::sse(&openai_sse_body(&[llama_chunk(json!({}), Some("stop"))]))
+            .with_delay(1_000),
+    ])
+    .await;
+    let options = StreamOptions {
+        timeout_ms: Some(200),
+        ..local_options()
+    };
+    let started = Instant::now();
+    let result =
+        openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options)
+            .result()
+            .await;
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "timed out before the response: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(result.error_message.as_deref(), Some("Request timed out."));
+}
+
+#[tokio::test]
+async fn server_disconnect_mid_stream_fails_like_undici_terminated() {
+    // undici rejects the body read with `TypeError: terminated`; the message is what the agent
+    // session's retry classification matches, so pi retries a dropped local server like TS.
+    let body = openai_sse_body(&[
+        llama_chunk(json!({"reasoning_content": "Hmm."}), None),
+        llama_chunk(json!({"content": "partial"}), None),
+    ]);
+    let frames: Vec<Vec<u8>> = body
+        .split_inclusive("\n\n")
+        .take(2)
+        .map(|frame| frame.as_bytes().to_vec())
+        .collect();
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::chunked(200, "text/event-stream", frames).truncated(),
+    ])
+    .await;
+    let (events, result) = openai_completions::stream(
+        &llama_cpp_model(&server.url),
+        &llama_context(),
+        local_options(),
+    )
+    .collect_all()
+    .await;
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(result.error_message.as_deref(), Some("terminated"));
+    assert!(is_retryable_assistant_error(&result));
+    // The partial content stays on the error message.
+    assert_eq!(
+        result.content[0].as_thinking().expect("thinking").thinking,
+        "Hmm."
+    );
+    assert_eq!(result.content[1].as_text().expect("text").text, "partial");
+    assert_eq!(
+        events.last().map(AssistantMessageEvent::type_name),
+        Some("error")
+    );
+}
+
+#[tokio::test]
+async fn idle_body_timeout_mid_stream_fails_like_undici_terminated() {
+    // No bytes for the idle timeout (the client's read timeout, undici's `bodyTimeout`) ends
+    // the stream with the same retryable `terminated` as a dropped connection.
+    let body = openai_sse_body(&[
+        llama_chunk(json!({"content": "never"}), None),
+        llama_chunk(json!({}), Some("stop")),
+    ]);
+    let frames: Vec<Vec<u8>> = body
+        .split_inclusive("\n\n")
+        .map(|frame| frame.as_bytes().to_vec())
+        .collect();
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::chunked(200, "text/event-stream", frames).with_chunk_delay(900),
+    ])
+    .await;
+    let client = reqwest::Client::builder()
+        .read_timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let options = StreamOptions {
+        http_client: Some(client),
+        ..local_options()
+    };
+    let (_, result) =
+        openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options)
+            .collect_all()
+            .await;
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(result.error_message.as_deref(), Some("terminated"));
+    assert!(is_retryable_assistant_error(&result));
+    // The response head arrived, the first body read stalled: no content yet.
+    assert!(result.content.is_empty(), "{:?}", result.content);
+}
+
+#[tokio::test]
+async fn user_abort_mid_stream_reports_aborted() {
+    let body = openai_sse_body(&[
+        llama_chunk(json!({"content": "first"}), None),
+        llama_chunk(json!({"content": " second"}), None),
+        llama_chunk(json!({}), Some("stop")),
+    ]);
+    let frames: Vec<Vec<u8>> = body
+        .split_inclusive("\n\n")
+        .map(|frame| frame.as_bytes().to_vec())
+        .collect();
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::chunked(200, "text/event-stream", frames).with_chunk_delay(300),
+    ])
+    .await;
+    let signal = tokio_util::sync::CancellationToken::new();
+    let options = StreamOptions {
+        signal: Some(signal.clone()),
+        ..local_options()
+    };
+    let mut stream =
+        openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options);
+    let mut types = Vec::new();
+    while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
+            signal.cancel();
+        }
+        types.push(event.type_name());
+        if let AssistantMessageEvent::Error { reason, error } = &event {
+            assert_eq!(*reason, StopReason::Aborted);
+            assert_eq!(error.stop_reason, StopReason::Aborted);
+            assert_eq!(error.error_message.as_deref(), Some("Request was aborted"));
+            assert_eq!(error.text(), "first");
+        }
+    }
+    assert_eq!(
+        types,
+        ["start", "text_start", "text_delta", "text_end", "error"]
+    );
+}
+
+#[tokio::test]
+async fn malformed_tool_call_json_finishes_with_an_arguments_error() {
+    let raw = "{\"path\": \"hello.txt\", ";
+    let server = mock_http::MockServer::sequence(vec![mock_http::Response::sse(&openai_sse_body(&[
+        llama_chunk(json!({"tool_calls": [{"index": 0, "id": "call_bad", "type": "function", "function": {"name": "read", "arguments": raw}}]}), None),
+        llama_chunk(json!({}), Some("tool_calls")),
+    ]))])
+    .await;
+    let (events, result) = openai_completions::stream(
+        &llama_cpp_model(&server.url),
+        &llama_context(),
+        local_options(),
+    )
+    .collect_all()
+    .await;
+    assert_eq!(
+        result.stop_reason,
+        StopReason::ToolUse,
+        "{:?}",
+        result.error_message
+    );
+    let call = result.tool_calls().next().expect("tool call");
+    // Streaming repair shows the partial arguments; the final parse reports the raw text.
+    assert!(call.arguments.is_empty(), "{:?}", call.arguments);
+    let error = call.arguments_error.as_deref().expect("arguments error");
+    assert!(
+        error.ends_with(&format!("\n\nReceived arguments:\n{raw}")),
+        "{error}"
+    );
+    let streamed = events.iter().find_map(|event| match event {
+        AssistantMessageEvent::ToolCallDelta { partial, .. } => partial
+            .tool_calls()
+            .next()
+            .map(|c| Value::Object(c.arguments.clone())),
+        _ => None,
+    });
+    assert_eq!(streamed, Some(json!({"path": "hello.txt"})));
+}
+
+#[tokio::test]
+async fn llama_cpp_http_errors_surface_the_server_message() {
+    let server = mock_http::MockServer::sequence(vec![mock_http::Response::json(
+        400,
+        json!({"error": {"code": 400, "message": "the request exceeds the available context size, try increasing it", "type": "exceed_context_size_error", "n_prompt_tokens": 9000, "n_ctx": 8192}}),
+    )])
+    .await;
+    let model = llama_cpp_model(&server.url);
+    let result = openai_completions::stream(&model, &llama_context(), local_options())
+        .result()
+        .await;
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some(
+            r#"400: {"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}"#
+        )
+    );
+    assert!(is_context_overflow(&result, Some(model.context_window)));
+    assert!(!is_retryable_assistant_error(&result));
+}
