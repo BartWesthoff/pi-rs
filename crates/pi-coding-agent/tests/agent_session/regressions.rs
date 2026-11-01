@@ -3145,3 +3145,86 @@ mod placeholder_model {
         harness.cleanup();
     }
 }
+
+// #11227: recovery omits tool results with their tool call.
+#[tokio::test]
+async fn pre_prompt_recovery_of_a_resumed_length_stop_omits_the_truncated_call_and_its_result() {
+    let harness = create_harness(HarnessOptions {
+        models: vec![pi_ai::providers::faux::FauxModelDefinition {
+            id: "faux-1".into(),
+            context_window: Some(100_000),
+            max_tokens: Some(1_000),
+            ..Default::default()
+        }],
+        settings: Some(json!({"compaction": {"enabled": true}})),
+        extension_factories: vec![crate::compaction::compactor("summary")],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let now = now_ms();
+    harness
+        .session_manager
+        .append_message(agent_message(
+            json!({"role": "user", "content": "check status", "timestamp": now - 1000}),
+        ))
+        .unwrap();
+    let mut truncated = create_assistant(&harness, StopReason::Length, None, 116, now - 500);
+    truncated.content = vec![pi_ai::providers::faux::faux_tool_call(
+        "bash",
+        json!({"command": "echo"}).as_object().cloned().unwrap(),
+        Some("call_truncated"),
+    )];
+    truncated.usage = serde_json::from_value(json!({
+        "input": 100,
+        "output": 16,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 116,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+    }))
+    .unwrap();
+    harness
+        .session_manager
+        .append_message(AgentMessage::Assistant(truncated))
+        .unwrap();
+    harness
+        .session_manager
+        .append_message(agent_message(json!({
+            "role": "toolResult",
+            "toolCallId": "call_truncated",
+            "toolName": "bash",
+            "isError": true,
+            "content": [{"type": "text", "text": "Not executed: output token limit reached."}],
+            "timestamp": now - 400
+        })))
+        .unwrap();
+    harness
+        .session
+        .agent()
+        .set_messages(harness.session_manager.build_session_context().messages);
+
+    let captured = Arc::new(Mutex::new(Vec::<pi_ai::types::Message>::new()));
+    let c = captured.clone();
+    harness.set_responses(vec![pi_ai::providers::faux::FauxResponseStep::factory(
+        move |context, _o, _s, _m| {
+            *c.lock() = context.messages.clone();
+            faux_text_message("done")
+        },
+    )]);
+
+    harness.session.prompt("continue", None).await.unwrap();
+
+    let request_messages = captured.lock().clone();
+    let roles: Vec<&str> = request_messages.iter().map(|m| m.role()).collect();
+    assert!(!roles.contains(&"toolResult"), "request roles: {roles:?}");
+    assert!(
+        !request_messages.iter().any(|m| matches!(
+            m,
+            pi_ai::types::Message::Assistant(a) if a.stop_reason == StopReason::Length
+        )),
+        "request still contains the length-stopped assistant message: {roles:?}"
+    );
+    harness.cleanup();
+}
