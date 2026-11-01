@@ -807,7 +807,9 @@ impl<'de> Deserialize<'de> for SystemMessage {
 pub struct UserMessage {
     #[serde(default, deserialize_with = "null_as_default")]
     pub content: UserContent,
-    #[serde(with = "lax_i64")]
+    /// Lax like the TS runtime: extensions build user messages without a timestamp (e.g. in
+    /// `context` handlers), which read as 0.
+    #[serde(default, with = "lax_i64")]
     pub timestamp: i64,
     /// For string `content`, as [`TextContent::lone_surrogates_removed`].
     #[serde(skip)]
