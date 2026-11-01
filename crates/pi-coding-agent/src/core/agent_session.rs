@@ -187,6 +187,7 @@ pub enum AgentSessionEvent {
     TurnStart,
     TurnEnd {
         message: AgentMessage,
+        #[serde(serialize_with = "pi_ai::types::tagged::tool_result_messages")]
         tool_results: Vec<ToolResultMessage>,
     },
     MessageStart {

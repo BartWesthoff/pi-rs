@@ -71,3 +71,56 @@ async fn includes_cumulative_usage_without_cumulative_message_snapshots() {
     assert!(wire["assistantMessageEvent"].get("partial").is_none());
     harness.cleanup();
 }
+
+/// The JSON/RPC wire form of a tool-call turn keeps the discriminants TS objects carry:
+/// `toolcall_end.toolCall.type` and `turn_end.toolResults[].role`.
+#[tokio::test]
+async fn tool_call_turns_keep_ts_discriminants_on_the_wire() {
+    let harness = create_harness(HarnessOptions::default()).await.unwrap();
+    harness.set_responses(vec![
+        pi_ai::providers::faux::FauxResponseStep::from(faux_assistant_message(
+            vec![faux_tool_call(
+                "read",
+                serde_json::json!({ "path": "missing.txt" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                Some("call_1"),
+            )],
+            FauxMessageOptions {
+                stop_reason: Some(pi_ai::types::StopReason::ToolUse),
+                ..Default::default()
+            },
+        )),
+        faux_text_message("done").into(),
+    ]);
+    harness.session.prompt("read it", None).await.unwrap();
+    let wire: Vec<serde_json::Value> = harness
+        .events()
+        .iter()
+        .map(|event| to_json_event_value(event).unwrap())
+        .collect();
+    let tool_call_end = wire
+        .iter()
+        .find(|event| {
+            event["type"] == "message_update"
+                && event["assistantMessageEvent"]["type"] == "toolcall_end"
+        })
+        .expect("toolcall_end update");
+    let tool_call = &tool_call_end["assistantMessageEvent"]["toolCall"];
+    assert_eq!(tool_call["type"], "toolCall");
+    assert_eq!(tool_call["id"], "call_1");
+    assert_eq!(tool_call["name"], "read");
+    let turn_end = wire
+        .iter()
+        .find(|event| {
+            event["type"] == "turn_end"
+                && event["toolResults"]
+                    .as_array()
+                    .is_some_and(|r| !r.is_empty())
+        })
+        .expect("turn_end with tool results");
+    assert_eq!(turn_end["toolResults"][0]["role"], "toolResult");
+    assert_eq!(turn_end["toolResults"][0]["toolCallId"], "call_1");
+    harness.cleanup();
+}
