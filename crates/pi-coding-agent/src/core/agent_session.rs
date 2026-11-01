@@ -4125,16 +4125,17 @@ impl AgentSession {
         self.wait_for_idle().await
     }
 
+    /// Resolves when the session is idle. Like TS's idle-wait promise it resolves at the next idle
+    /// transition, even if another run has started again by the time this waiter resumes.
     pub async fn wait_for_idle(&self) -> anyhow::Result<()> {
         let mut rx = self.idle_tx.subscribe();
-        loop {
-            if self.is_idle() {
-                return Ok(());
-            }
-            if rx.changed().await.is_err() {
-                return Ok(());
-            }
+        if self.is_idle() {
+            return Ok(());
         }
+        // `resolve_idle_wait_if_idle` bumps the counter only on an idle transition; a closed
+        // channel means the session is gone, which leaves nothing to wait for either.
+        let _ = rx.changed().await;
+        Ok(())
     }
 
     // =========================================================================

@@ -318,3 +318,33 @@ async fn persists_message_end_events_in_order_with_slow_extension_handlers() {
     assert_eq!(message_roles(&harness), ["system", "user", "assistant", "toolResult", "assistant"]);
     harness.cleanup();
 }
+
+/// RPC `abort` answers once the aborted run settles (TS resolves its idle-wait promise at that
+/// transition), even when a client already started the next prompt before the waiter ran.
+#[tokio::test]
+async fn idle_waiters_resolve_at_the_settle_even_if_a_new_prompt_starts() {
+    let (harness, first) = streaming_harness(HarnessOptions::default()).await;
+    let session = harness.session.clone();
+    let wait = session.wait_for_idle();
+    tokio::pin!(wait);
+    assert!(
+        futures::poll!(&mut wait).is_pending(),
+        "the session is streaming"
+    );
+
+    // The aborted run settles while the waiter is not polled; the next prompt then starts.
+    harness.session.agent().abort();
+    first.await.unwrap().unwrap();
+    assert!(harness.session.is_idle());
+    let next_session = harness.session.clone();
+    let second = tokio::spawn(async move { next_session.prompt("Next message", None).await });
+    wait_for_streaming(&harness).await;
+
+    tokio::time::timeout(Duration::from_secs(2), &mut wait)
+        .await
+        .expect("the waiter resolves at the settle it was waiting for")
+        .unwrap();
+    harness.session.abort().await.unwrap();
+    let _ = second.await;
+    harness.cleanup();
+}
