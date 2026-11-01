@@ -1,6 +1,6 @@
 # pi-rs
 
-A Rust port of [pi](https://github.com/earendil-works/pi), the minimal, extensible coding agent
+A Rust port of [pi](https://github.com/earendil-works/pi) 1.4.0, the minimal, extensible coding agent
 harness. It builds a single native `pi` binary with the same CLI, terminal UI, on-disk formats
 (sessions, settings, `auth.json`, `models.json`), RPC protocol and extension API as the
 TypeScript version. No Node.js or Bun is needed at runtime: TypeScript extensions run on an
