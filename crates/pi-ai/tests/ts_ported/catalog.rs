@@ -181,12 +181,10 @@ async fn xiaomi_models_and_thinking_toggle() {
 
 #[test]
 fn zai_coding_plan_catalog() {
-    // The TS test expects cacheRead 0.05, but the checked-in catalog (identical in both trees)
-    // carries 0 for GLM-4.6V, so cacheRead is not compared.
     assert_matches(
         &serde_json::to_value(builtin("zai-coding-cn", "glm-4.6v")).unwrap(),
         &json!({"id": "glm-4.6v", "provider": "zai-coding-cn", "api": "openai-completions", "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
-            "reasoning": true, "input": ["text", "image"], "cost": {"input": 0.3, "output": 0.9, "cacheWrite": 0},
+            "reasoning": true, "input": ["text", "image"], "cost": {"input": 0.3, "output": 0.9, "cacheRead": 0.05, "cacheWrite": 0},
             "contextWindow": 128000, "maxTokens": 32768, "compat": {"maxTokensField": "max_tokens", "thinkingFormat": "zai", "zaiToolStream": true}}),
         "glm-4.6v",
     );
@@ -308,6 +306,18 @@ fn grouped_catalog_api_routing() {
         let model = builtin("xai", id);
         assert_eq!((model.api.as_str(), model.id.as_str(), model.provider.as_str()), ("openai-responses", id, "xai"));
     }
+    // xai-responses.test.ts: the reasoning efforts xAI supports per model.
+    for id in ["grok-4.5", "grok-4.6", "grok-4.7"] {
+        assert_eq!(
+            levels(&builtin("xai", id)),
+            ["low", "medium", "high", "xhigh"],
+            "{id}"
+        );
+    }
+    assert_eq!(
+        levels(&builtin("xai", "grok-4.3")),
+        ["off", "low", "medium", "high", "xhigh"]
+    );
     assert_eq!(builtin("github-copilot", "grok-4.5").api, "openai-responses");
     // Regression test for https://github.com/earendil-works/pi/issues/9209
     let gpt: Vec<Model> = get_builtin_models("github-copilot").into_iter().filter(|m| m.id.starts_with("gpt-")).collect();
