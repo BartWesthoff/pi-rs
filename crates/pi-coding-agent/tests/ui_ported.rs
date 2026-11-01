@@ -715,7 +715,7 @@ mod config_selector {
     }
 
     async fn builtin_paths(settings: &Arc<SettingsManager>, d: &Dirs, builtins: &[&str]) -> ResolvedPaths {
-        DefaultPackageManager::new(&PackageManagerOptions {
+        let mut paths = DefaultPackageManager::new(&PackageManagerOptions {
             cwd: d.project.clone(),
             agent_dir: d.agent.clone(),
             settings_manager: settings.clone(),
@@ -723,7 +723,16 @@ mod config_selector {
         })
         .resolve(None)
         .await
-        .unwrap()
+        .unwrap();
+        // Resolution also auto-discovers the real user's `~/.agents/skills`, which would put user
+        // skills before the built-ins in the list. The TS test assumes a home without them.
+        paths
+            .extensions
+            .retain(|resource| resource.metadata.source == "builtin");
+        paths.skills.clear();
+        paths.prompts.clear();
+        paths.themes.clear();
+        paths
     }
 
     #[test]

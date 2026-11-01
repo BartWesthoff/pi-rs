@@ -102,6 +102,12 @@ fn retry_classification() {
 }
 
 #[test]
+fn chatgpt_business_workspace_usage_limit_stays_non_retryable() {
+    let message = r#"OpenAI API error (429): {"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"Usage limit reached."}"#;
+    assert!(!is_retryable_assistant_error(&error_message(message)));
+}
+
+#[test]
 fn retry_delay_caps() {
     assert_eq!(retry_delay_ms(2000, None, 6), 60000);
     assert_eq!(retry_delay_ms(2000, Some(5000), 5), 5000);

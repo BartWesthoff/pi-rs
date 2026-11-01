@@ -298,12 +298,12 @@ async fn session_headers_cache_key_and_overrides() {
 #[tokio::test]
 async fn simple_options_reasoning_and_tool_choice() {
     let server = serve_sequence(vec![Reply::sse(data_sse(&sse_events("completed", None)))]).await;
-    let mut gpt55 = pi_ai::providers::all::get_builtin_model("openai-codex", "gpt-5.5").unwrap();
-    gpt55.base_url = server.base_url.clone();
+    let mut sol = pi_ai::providers::all::get_builtin_model("openai-codex", "gpt-6.1-sol").unwrap();
+    sol.base_url = server.base_url.clone();
     let mut opts = options(&mock_token("a"), Transport::Sse);
     opts.reasoning = Some(ThinkingLevel::Xhigh);
     opts.tool_choice = Some(ToolChoice::None);
-    codex::stream_simple(&gpt55, &context("x"), opts)
+    codex::stream_simple(&sol, &context("x"), opts)
         .result()
         .await;
     let body = server.requests()[0].decoded_json();

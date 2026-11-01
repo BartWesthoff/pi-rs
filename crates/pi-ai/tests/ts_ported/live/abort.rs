@@ -1,7 +1,6 @@
 //! Live port of abort.test.ts (offline abort handling is covered by the per-provider mock tests).
 
 use pi_ai::compat::{complete, stream};
-use pi_ai::*;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 

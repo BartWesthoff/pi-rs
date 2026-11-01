@@ -261,6 +261,16 @@ pub struct ModelCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_fallback_models: Option<Vec<AnthropicAllowedFallbackModel>>,
 
+    // ---- System One classifiers ----
+    /// How the service takes classifier images. Auto-detected from the provider, baseUrl, and
+    /// model ID when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<SystemOneImageInput>,
+    /// Whether requests with images send TypeSafe's `TypeSafe-Danger-Zone-Images: true` opt-in
+    /// header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_image_opt_in_header: Option<bool>,
+
     /// Additional properties not modeled above.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -271,7 +281,21 @@ pub type OpenAIResponsesCompat = ModelCompat;
 pub type AnthropicMessagesCompat = ModelCompat;
 pub type BedrockCompat = ModelCompat;
 pub type MistralConversationsCompat = ModelCompat;
+/// Compatibility settings for System One classifier APIs.
+pub type SystemOneCompat = ModelCompat;
 pub type ProviderCompat = ModelCompat;
+
+/// How a System One service takes classifier images (`SystemOneCompat.imageInput`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemOneImageInput {
+    /// TypeSafe's `assets` map (PNG and JPEG), referenced by name from the state.
+    Assets,
+    /// Clef's `images` list of data URLs (PNG, JPEG, and WebP, at most four).
+    Images,
+    /// OpenRouter's form: `image_url` parts placed before the state.
+    StateImageUrls,
+}
 
 impl ModelCompat {
     /// Merge `override_` on top of `self` field by field (shallow, like `{ ...base, ...override }`).
