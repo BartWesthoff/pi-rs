@@ -3034,6 +3034,9 @@ pub struct ProviderClassifierModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
     pub context_window: u64,
+    /// Compatibility overrides for System One classifier APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<ModelCompat>,
 }
 
 /// Configuration for a model within a provider, discriminated by `type` (absent = `"chat"`).

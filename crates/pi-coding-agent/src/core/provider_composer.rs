@@ -508,8 +508,21 @@ fn apply_models_json(
             if !radius && let Some(base_url) = &config.base_url {
                 model.set_base_url(base_url.clone());
             }
-            if let AnyModel::Chat(chat) = &mut model {
-                chat.compat = merge_compat(chat.compat.as_deref(), config.compat.as_ref());
+            match &mut model {
+                AnyModel::Chat(chat) => {
+                    chat.compat = merge_compat(chat.compat.as_deref(), config.compat.as_ref())
+                }
+                // Classifier APIs read their own compat fields, such as how a System One service
+                // takes images. A shallow merge, like `{ ...model.compat, ...config.compat }`.
+                AnyModel::Classifier(classifier) => {
+                    if let Some(over) = &config.compat {
+                        let mut merged =
+                            compat_to_map(classifier.compat.as_deref()).unwrap_or_default();
+                        merged.extend(over.iter().map(|(key, value)| (key.clone(), value.clone())));
+                        classifier.compat = map_to_compat(Some(merged));
+                    }
+                }
+                AnyModel::Image(_) => {}
             }
             model
         })

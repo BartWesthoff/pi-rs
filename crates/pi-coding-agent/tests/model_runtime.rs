@@ -1148,6 +1148,119 @@ async fn lists_jev_separately_and_classifies_with_runtime_resolved_auth() {
     assert_eq!(result.answers["approved"], ClassifierAnswer::Bool { probability: 0.8 });
 }
 
+/// A System One mock reached as `http://proxy.example.com:<port>`: the HTTP client resolves the
+/// host to the mock, like the TS test's `fetch` stub, so models keep a non-local base URL.
+async fn proxy_classifier_server() -> (mock_http::MockServer, String, reqwest::Client) {
+    let server = mock_http::MockServer::start(|_, _| {
+        mock_http::Response::json(
+            200,
+            json!({ "answers": { "approved": { "type": "noul", "noul": 0.8 } } }),
+        )
+    })
+    .await;
+    let address: std::net::SocketAddr = server.url.trim_start_matches("http://").parse().unwrap();
+    let base_url = format!("http://proxy.example.com:{}/v1", address.port());
+    let client = reqwest::Client::builder()
+        .resolve("proxy.example.com", address)
+        .build()
+        .unwrap();
+    (server, base_url, client)
+}
+
+/// Classify one PNG image and return the request the service received.
+async fn capture_image_request(
+    runtime: &ModelRuntime,
+    server: &mock_http::MockServer,
+    client: reqwest::Client,
+    provider: &str,
+    id: &str,
+) -> mock_http::Request {
+    runtime
+        .set_runtime_api_key(provider, "secret", None)
+        .await
+        .unwrap();
+    let Some(AnyModel::Classifier(model)) =
+        runtime.get_model_of_type(ModelType::Classifier, provider, id)
+    else {
+        panic!("missing classifier {provider}/{id}");
+    };
+    let context = ClassifierContext {
+        images: Some(vec![ImageContent {
+            data: "cG5n".into(),
+            mime_type: "image/png".into(),
+        }]),
+        ..classifier_context()
+    };
+    let options = StreamOptions {
+        http_client: Some(client),
+        ..Default::default()
+    };
+    let result = runtime.classify(model, context, Some(options.into())).await;
+    assert_eq!(
+        result.stop_reason,
+        ClassifierStopReason::Stop,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(server.requests().len(), 1);
+    server.request(0)
+}
+
+fn image_url_state() -> Value {
+    json!([
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,cG5n" } },
+        Value::Object(classifier_context().state)
+    ])
+}
+
+#[tokio::test]
+async fn keeps_openrouter_image_form_when_models_json_routes_openrouter_through_a_proxy() {
+    let (server, base_url, client) = proxy_classifier_server().await;
+    let (runtime, _dir) = runtime_with_models_json(
+        AuthStorage::in_memory(None),
+        json!({ "providers": { "openrouter": { "baseUrl": base_url } } }),
+    )
+    .await;
+
+    let request =
+        capture_image_request(&runtime, &server, client, "openrouter", "typesafe/jev-1.14").await;
+
+    // OpenRouter answers TypeSafe `assets` with 200 but drops the images.
+    assert_eq!(request.path, "/v1/systemone");
+    assert!(
+        request
+            .header("host")
+            .is_some_and(|host| host.starts_with("proxy.example.com"))
+    );
+    let body = request.json();
+    assert_eq!(body["state"], image_url_state());
+    assert!(body.get("assets").is_none());
+    assert!(request.header("typesafe-danger-zone-images").is_none());
+}
+
+#[tokio::test]
+async fn applies_provider_compat_from_models_json_to_classifier_models() {
+    let (server, base_url, client) = proxy_classifier_server().await;
+    let (runtime, _dir) = runtime_with_models_json(
+        AuthStorage::in_memory(None),
+        json!({
+            "providers": {
+                "typesafe": {
+                    "baseUrl": base_url,
+                    "compat": { "imageInput": "state-image-urls", "sendImageOptInHeader": false }
+                }
+            }
+        }),
+    )
+    .await;
+
+    let request = capture_image_request(&runtime, &server, client, "typesafe", "jev-latest").await;
+
+    assert_eq!(request.path, "/v1/systemone");
+    assert_eq!(request.json()["state"], image_url_state());
+    assert!(request.header("typesafe-danger-zone-images").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // model-runtime-images.test.ts
 // ---------------------------------------------------------------------------
