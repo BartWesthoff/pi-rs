@@ -133,3 +133,7 @@ harness = false
 name = "tool_output"
 harness = false
 
+[[bench]]
+name = "journal"
+harness = false
+

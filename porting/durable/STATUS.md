@@ -96,8 +96,13 @@ Both gate scripts are slow; run them on a quiet machine.
   uses the same native provider is future work.
 - **No real model provider on wasm32.** Harness turns on wasm32 are verified only with the faux
   provider; CORS/fetch behavior for real providers is unverified there.
-- **Typed Journal cost.** Code mode's typed `pi.codemode.journal` document has a representation
-  cost versus the reference's untyped journal; not yet measured against a target budget.
+- **Typed Journal cost — measured, no cost.** The typed `pi.codemode.journal` document is *cheaper*,
+  not more expensive, than the reference's untyped journal. Measured in
+  `crates/pi-durable/benches/journal.rs` (budget: typed heap ≤ 2.0× untyped heap — passes with
+  3× margin): at 100/1k/10k entries the typed heap is ~3.1× below the untyped `serde_json::Value`
+  baseline (ratio ≈ 0.33), and the serialized/persisted byte cost is byte-for-byte identical
+  (typed and untyped serialize to the same JSON). The typed representation is a net saving, not
+  a cost; no further work needed.
 - **Load sensitivity.** At a machine load average of 200 or more, "forgets ended subagent chains" can exceed
   its 5-second deadline (2/40 in one batch, with the host-ack step gate described below in
   place); the embedded 20,000-deep retention case times out at that load with or without the
