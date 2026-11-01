@@ -3,7 +3,6 @@
 
 use pi_ai::compat::stream;
 use pi_ai::providers::all::{get_builtin_image_model, get_builtin_models};
-use pi_ai::*;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 

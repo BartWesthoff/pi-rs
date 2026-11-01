@@ -285,8 +285,7 @@ async fn send_completion(model: &Model, options: StreamOptions) -> CapturedReque
         "{:?}",
         result.error_message
     );
-    let request = server.requests.lock()[0].clone();
-    request
+    server.requests.lock()[0].clone()
 }
 
 #[tokio::test]
@@ -388,8 +387,7 @@ async fn send_through(models: &Models, model: &Model, options: StreamOptions) ->
         "{:?}",
         result.error_message
     );
-    let request = server.requests.lock()[0].clone();
-    request
+    server.requests.lock()[0].clone()
 }
 
 #[tokio::test]
@@ -483,8 +481,7 @@ async fn sends_the_open_code_session_header_to_custom_providers_pointing_at_open
             "{:?}",
             result.error_message
         );
-        let request = server.requests.lock()[0].clone();
-        request
+        server.requests.lock()[0].clone()
     };
 
     assert_eq!(
