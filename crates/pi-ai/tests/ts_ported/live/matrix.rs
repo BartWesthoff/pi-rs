@@ -3,7 +3,6 @@
 
 use base64::Engine;
 use pi_ai::compat::complete;
-use pi_ai::*;
 use serde_json::{Value, json};
 
 use super::*;

@@ -4,7 +4,6 @@
 use pi_ai::compat::{complete, complete_simple};
 use pi_ai::env_api_keys::get_env_api_key;
 use pi_ai::providers::all::get_builtin_model;
-use pi_ai::*;
 use serde_json::{Value, json};
 
 use super::*;

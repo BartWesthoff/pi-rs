@@ -2,7 +2,6 @@
 //! anthropic-tool-name-normalization.test.ts and responseid.test.ts.
 
 use pi_ai::compat::{complete, stream};
-use pi_ai::*;
 use serde_json::json;
 
 use super::matrix::red_circle_base64;
