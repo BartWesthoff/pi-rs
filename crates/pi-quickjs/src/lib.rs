@@ -33,20 +33,35 @@ pub type JsResult<T> = Result<T, JsError>;
 
 /// Additions of the vendored QuickJS (`vendor/rquickjs-sys/PATCH.md` in the pi-rs repository).
 pub mod ext {
-    use std::ffi::c_void;
+    use std::ffi::{c_char, c_int, c_void};
 
     use rquickjs::qjs::{JSContext, JSRuntime, JSValue};
 
     /// Captures the host context of a promise job when it is created (a new reference).
-    pub type JobContextCapture = unsafe extern "C" fn(ctx: *mut JSContext, opaque: *mut c_void) -> JSValue;
+    pub type JobContextCapture =
+        unsafe extern "C" fn(ctx: *mut JSContext, opaque: *mut c_void) -> JSValue;
     /// Enters a job's host context; returns the previous one (a new reference).
-    pub type JobContextEnter = unsafe extern "C" fn(ctx: *mut JSContext, job_context: JSValue, opaque: *mut c_void) -> JSValue;
+    pub type JobContextEnter = unsafe extern "C" fn(
+        ctx: *mut JSContext,
+        job_context: JSValue,
+        opaque: *mut c_void,
+    ) -> JSValue;
     /// Leaves a job's host context, restoring (and taking) the previous one.
-    pub type JobContextExit = unsafe extern "C" fn(ctx: *mut JSContext, previous: JSValue, opaque: *mut c_void);
+    pub type JobContextExit =
+        unsafe extern "C" fn(ctx: *mut JSContext, previous: JSValue, opaque: *mut c_void);
     /// `(UTC - local time)` in minutes at `time_ms`.
     pub type TimezoneOffset = unsafe extern "C" fn(time_ms: i64, opaque: *mut c_void) -> i32;
     /// The current time of `Date`, in ms since the epoch.
     pub type DateNow = unsafe extern "C" fn(opaque: *mut c_void) -> i64;
+
+    /// [`JS_RequireModule`] returned the module namespace.
+    pub const JS_REQUIRE_MODULE_OK: c_int = 0;
+    /// [`JS_RequireModule`] failed with a pending exception.
+    pub const JS_REQUIRE_MODULE_ERROR: c_int = 1;
+    /// The required module graph has top-level await (or is still evaluating asynchronously).
+    pub const JS_REQUIRE_MODULE_ASYNC: c_int = 2;
+    /// The required module graph contains a module that is being linked or evaluated.
+    pub const JS_REQUIRE_MODULE_CYCLE: c_int = 3;
 
     unsafe extern "C" {
         /// Install the promise job context hooks.
@@ -58,11 +73,23 @@ pub mod ext {
             opaque: *mut c_void,
         );
         /// Install the local timezone hook of `Date`.
-        pub fn JS_SetTimezoneOffsetFunc(rt: *mut JSRuntime, func: Option<TimezoneOffset>, opaque: *mut c_void);
+        pub fn JS_SetTimezoneOffsetFunc(
+            rt: *mut JSRuntime,
+            func: Option<TimezoneOffset>,
+            opaque: *mut c_void,
+        );
         /// Replace the global object of a context.
         pub fn JS_SetGlobalObject(ctx: *mut JSContext, obj: JSValue);
         /// Install the clock of `Date`.
         pub fn JS_SetDateNowFunc(rt: *mut JSRuntime, func: Option<DateNow>, opaque: *mut c_void);
+        /// `require()` of an ES module: load, link and evaluate `filename` synchronously without
+        /// running promise jobs. `*status` receives one of the `JS_REQUIRE_MODULE_*` values.
+        pub fn JS_RequireModule(
+            ctx: *mut JSContext,
+            basename: *const c_char,
+            filename: *const c_char,
+            status: *mut c_int,
+        ) -> JSValue;
     }
 }
 
@@ -88,7 +115,11 @@ fn try_engine() -> Option<&'static EngineData> {
     let p = ENGINE.with(|e| e.get());
     // SAFETY: the pointer is set while the owning `Engine` (which boxes the data) is alive on this
     // thread and cleared when it is dropped.
-    if p.is_null() { None } else { Some(unsafe { &*p }) }
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { &*p })
+    }
 }
 
 fn engine() -> &'static EngineData {
@@ -136,8 +167,17 @@ impl Engine {
                 qjs::JS_SetMaxStackSize(rt, options.max_stack_size as _);
             }
         }
-        let fn_class = unsafe { register_class(rt, c"Function", Some(fn_finalizer), None, Some(fn_call)) };
-        let data_class = unsafe { register_class(rt, c"HostObject", Some(data_finalizer), Some(data_mark), None) };
+        let fn_class =
+            unsafe { register_class(rt, c"Function", Some(fn_finalizer), None, Some(fn_call)) };
+        let data_class = unsafe {
+            register_class(
+                rt,
+                c"HostObject",
+                Some(data_finalizer),
+                Some(data_mark),
+                None,
+            )
+        };
         let data = Box::new(EngineData {
             rt,
             main: Cell::new(main),
@@ -148,7 +188,11 @@ impl Engine {
             data: RefCell::default(),
         });
         ENGINE.with(|e| e.set(&*data as *const EngineData));
-        let engine = Engine { data, context: Some(context), runtime: Some(runtime) };
+        let engine = Engine {
+            data,
+            context: Some(context),
+            runtime: Some(runtime),
+        };
         register_intrinsics(main);
         Ok(engine)
     }
@@ -201,7 +245,13 @@ unsafe fn register_class(
     let mut id: qjs::JSClassID = 0;
     unsafe {
         qjs::JS_NewClassID(rt, &mut id);
-        let def = qjs::JSClassDef { class_name: name.as_ptr(), finalizer, gc_mark, call, exotic: ptr::null_mut() };
+        let def = qjs::JSClassDef {
+            class_name: name.as_ptr(),
+            finalizer,
+            gc_mark,
+            call,
+            exotic: ptr::null_mut(),
+        };
         qjs::JS_NewClass(rt, id, &def);
     }
     id
@@ -252,7 +302,11 @@ fn check(ctx: *mut qjs::JSContext, v: qjs::JSValue) -> JsResult<JsValue> {
 }
 
 fn check_int(ctx: *mut qjs::JSContext, r: c_int) -> JsResult<c_int> {
-    if r < 0 { Err(take_exception_raw(ctx)) } else { Ok(r) }
+    if r < 0 {
+        Err(take_exception_raw(ctx))
+    } else {
+        Ok(r)
+    }
 }
 
 /// Throw `err` in `ctx` (for returning from QuickJS callbacks); returns `JS_EXCEPTION`.
@@ -354,7 +408,8 @@ impl JsValue {
     }
     /// Is an integral number.
     pub fn is_integral_number(&self) -> bool {
-        self.as_number().is_some_and(|n| n.is_finite() && n.fract() == 0.0)
+        self.as_number()
+            .is_some_and(|n| n.is_finite() && n.fract() == 0.0)
     }
     /// Is a string.
     pub fn is_string(&self) -> bool {
@@ -407,7 +462,8 @@ impl JsValue {
     }
     /// The function, if this is callable.
     pub fn as_function(&self) -> Option<JsFunction> {
-        self.is_callable().then(|| JsFunction(JsObject(self.clone())))
+        self.is_callable()
+            .then(|| JsFunction(JsObject(self.clone())))
     }
     /// The callable object, if this is callable.
     pub fn as_callable(&self) -> Option<JsFunction> {
@@ -460,14 +516,18 @@ impl JsValue {
             return Ok(n);
         }
         let mut out = 0f64;
-        check_int(ctx.raw, unsafe { qjs::JS_ToFloat64(ctx.raw, &mut out, self.0) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_ToFloat64(ctx.raw, &mut out, self.0)
+        })?;
         Ok(out)
     }
 
     /// `ToInt32`.
     pub fn to_i32(&self, ctx: &mut Context) -> JsResult<i32> {
         let mut out = 0i32;
-        check_int(ctx.raw, unsafe { qjs::JS_ToInt32(ctx.raw, &mut out, self.0) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_ToInt32(ctx.raw, &mut out, self.0)
+        })?;
         Ok(out)
     }
 
@@ -479,7 +539,9 @@ impl JsValue {
     /// `ToIndex`.
     pub fn to_index(&self, ctx: &mut Context) -> JsResult<u64> {
         let mut out = 0u64;
-        check_int(ctx.raw, unsafe { qjs::JS_ToIndex(ctx.raw, &mut out, self.0) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_ToIndex(ctx.raw, &mut out, self.0)
+        })?;
         Ok(out)
     }
 
@@ -510,7 +572,9 @@ impl JsValue {
     /// `ToBigInt64` (BigInts and numbers).
     pub fn to_big_int64(&self, ctx: &mut Context) -> JsResult<i64> {
         let mut out = 0i64;
-        check_int(ctx.raw, unsafe { qjs::JS_ToBigInt64(ctx.raw, &mut out, self.0) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_ToBigInt64(ctx.raw, &mut out, self.0)
+        })?;
         Ok(out)
     }
 
@@ -579,11 +643,19 @@ impl JsValue {
     /// and symbols).
     pub fn to_json(&self, ctx: &mut Context) -> JsResult<Option<serde_json::Value>> {
         let undefined = JsValue::undefined();
-        let s = check(ctx.raw, unsafe { qjs::JS_JSONStringify(ctx.raw, self.0, undefined.0, undefined.0) })?;
-        let Some(s) = s.as_string() else { return Ok(None) };
+        let s = check(ctx.raw, unsafe {
+            qjs::JS_JSONStringify(ctx.raw, self.0, undefined.0, undefined.0)
+        })?;
+        let Some(s) = s.as_string() else {
+            return Ok(None);
+        };
         serde_json::from_str(&s.to_std_string_lossy())
             .map(Some)
-            .map_err(|e| JsNativeError::typ().with_message(format!("invalid JSON: {e}")).into())
+            .map_err(|e| {
+                JsNativeError::typ()
+                    .with_message(format!("invalid JSON: {e}"))
+                    .into()
+            })
     }
 }
 
@@ -655,7 +727,11 @@ impl fmt::Display for JsValueDisplay<'_> {
 }
 
 fn number_value(n: f64) -> JsValue {
-    if n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 && !(n == 0.0 && n.is_sign_negative()) {
+    if n.fract() == 0.0
+        && n >= i32::MIN as f64
+        && n <= i32::MAX as f64
+        && !(n == 0.0 && n.is_sign_negative())
+    {
         JsValue(qjs::JS_MKVAL(qjs::JS_TAG_INT, n as i32))
     } else {
         JsValue(qjs::JS_NewFloat64(n))
@@ -780,7 +856,9 @@ impl JsString {
 
     /// The UTF-16 code units (lone surrogates are kept).
     pub fn to_utf16(&self) -> Vec<u16> {
-        let Some(e) = try_engine() else { return Vec::new() };
+        let Some(e) = try_engine() else {
+            return Vec::new();
+        };
         let ctx = e.main.get();
         unsafe {
             let mut len: qjs::size_t = 0;
@@ -814,9 +892,17 @@ fn decode_cesu8(bytes: &[u8]) -> Vec<u16> {
         } else if b >> 5 == 0b110 && i + 1 < bytes.len() {
             (((b as u32 & 0x1f) << 6) | (bytes[i + 1] as u32 & 0x3f), 2)
         } else if b >> 4 == 0b1110 && i + 2 < bytes.len() {
-            (((b as u32 & 0x0f) << 12) | ((bytes[i + 1] as u32 & 0x3f) << 6) | (bytes[i + 2] as u32 & 0x3f), 3)
+            (
+                ((b as u32 & 0x0f) << 12)
+                    | ((bytes[i + 1] as u32 & 0x3f) << 6)
+                    | (bytes[i + 2] as u32 & 0x3f),
+                3,
+            )
         } else if b >> 3 == 0b11110 && i + 3 < bytes.len() {
-            let cp = ((b as u32 & 0x07) << 18) | ((bytes[i + 1] as u32 & 0x3f) << 12) | ((bytes[i + 2] as u32 & 0x3f) << 6) | (bytes[i + 3] as u32 & 0x3f);
+            let cp = ((b as u32 & 0x07) << 18)
+                | ((bytes[i + 1] as u32 & 0x3f) << 12)
+                | ((bytes[i + 2] as u32 & 0x3f) << 6)
+                | (bytes[i + 3] as u32 & 0x3f);
             (cp, 4)
         } else {
             (0xfffd, 1)
@@ -913,9 +999,13 @@ impl JsSymbol {
     /// A new unique symbol.
     pub fn new(description: Option<JsString>) -> Option<JsSymbol> {
         let ctx = main_ctx();
-        let desc = description.map(|d| d.to_std_string_lossy()).unwrap_or_default();
+        let desc = description
+            .map(|d| d.to_std_string_lossy())
+            .unwrap_or_default();
         let c = CString::new(desc.replace('\0', "")).ok()?;
-        check(ctx, unsafe { qjs::JS_NewSymbol(ctx, c.as_ptr(), false) }).ok().map(JsSymbol)
+        check(ctx, unsafe { qjs::JS_NewSymbol(ctx, c.as_ptr(), false) })
+            .ok()
+            .map(JsSymbol)
     }
 
     /// `symbol.description`
@@ -923,14 +1013,20 @@ impl JsSymbol {
         let mut ctx = Context::from_raw(main_ctx());
         let key = PropertyKey::from("description");
         let atom = key.atom(&ctx).ok()?;
-        let v = check(ctx.raw, unsafe { qjs::JS_GetProperty(ctx.raw, self.0.0, atom.0) }).ok()?;
+        let v = check(ctx.raw, unsafe {
+            qjs::JS_GetProperty(ctx.raw, self.0.0, atom.0)
+        })
+        .ok()?;
         let _ = &mut ctx;
         v.as_string()
     }
 
     /// `Symbol(description)`
     pub fn descriptive_string(&self) -> JsString {
-        let d = self.description().map(|d| d.to_std_string_lossy()).unwrap_or_default();
+        let d = self
+            .description()
+            .map(|d| d.to_std_string_lossy())
+            .unwrap_or_default();
         JsString::from(format!("Symbol({d})").as_str())
     }
 }
@@ -961,8 +1057,14 @@ impl JsBigInt {
     /// Parse a decimal BigInt literal.
     pub fn from_string(s: &str) -> Option<JsBigInt> {
         let mut ctx = Context::from_raw(main_ctx());
-        let f = ctx.global_object().get("BigInt", &mut ctx).ok()?.as_function()?;
-        let v = f.call(&JsValue::undefined(), &[JsValue::from(s)], &mut ctx).ok()?;
+        let f = ctx
+            .global_object()
+            .get("BigInt", &mut ctx)
+            .ok()?
+            .as_function()?;
+        let v = f
+            .call(&JsValue::undefined(), &[JsValue::from(s)], &mut ctx)
+            .ok()?;
         v.as_bigint()
     }
 
@@ -1074,7 +1176,11 @@ pub struct JsNativeError {
 
 impl JsNativeError {
     fn new(kind: JsNativeErrorKind) -> Self {
-        JsNativeError { kind, message: String::new(), cause: None }
+        JsNativeError {
+            kind,
+            message: String::new(),
+            cause: None,
+        }
     }
     /// `Error`
     pub fn error() -> Self {
@@ -1158,7 +1264,11 @@ impl JsNativeError {
             let cause = cause.to_opaque(ctx);
             let _ = obj.define_property_or_throw(
                 "cause",
-                PropertyDescriptor::builder().value(cause).writable(true).enumerable(false).configurable(true),
+                PropertyDescriptor::builder()
+                    .value(cause)
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
                 ctx,
             );
         }
@@ -1226,7 +1336,9 @@ impl JsError {
 
     /// An error no `try` can catch (like QuickJS's interrupt): it ends the running script.
     pub fn uncatchable(message: &str, ctx: &mut Context) -> JsError {
-        let obj = JsNativeError::internal().with_message(message).to_opaque(ctx);
+        let obj = JsNativeError::internal()
+            .with_message(message)
+            .to_opaque(ctx);
         unsafe { qjs::JS_SetUncatchableError(ctx.raw, obj.as_raw()) };
         JsError::from_opaque(obj.into())
     }
@@ -1295,7 +1407,10 @@ pub struct Source<'a> {
 impl<'a> Source<'a> {
     /// Source from bytes (UTF-8).
     pub fn from_bytes<B: AsRef<[u8]> + ?Sized>(code: &'a B) -> Self {
-        Source { code: Cow::Borrowed(code.as_ref()), path: None }
+        Source {
+            code: Cow::Borrowed(code.as_ref()),
+            path: None,
+        }
     }
     /// Set the file name used in stack traces.
     pub fn with_path(mut self, path: &Path) -> Self {
@@ -1307,7 +1422,11 @@ impl<'a> Source<'a> {
 impl Context {
     /// A handle for a raw context of this thread's engine.
     pub fn from_raw(raw: *mut qjs::JSContext) -> Context {
-        Context { raw, realm: Realm(raw), intrinsics: Intrinsics { ctx: raw } }
+        Context {
+            raw,
+            realm: Realm(raw),
+            intrinsics: Intrinsics { ctx: raw },
+        }
     }
 
     /// The raw context.
@@ -1340,7 +1459,9 @@ impl Context {
         let e = engine();
         let raw = unsafe { qjs::JS_NewContext(e.rt) };
         if raw.is_null() {
-            return Err(JsNativeError::error().with_message("failed to create realm").into());
+            return Err(JsNativeError::error()
+                .with_message("failed to create realm")
+                .into());
         }
         e.realms.borrow_mut().push(raw);
         register_intrinsics(raw);
@@ -1359,24 +1480,48 @@ impl Context {
 
     /// Evaluate a classic script in the global scope.
     pub fn eval(&mut self, source: Source<'_>) -> JsResult<JsValue> {
-        let name = source.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "<eval>".into());
+        let name = source
+            .path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<eval>".into());
         self.eval_with_flags(&source.code, &name, qjs::JS_EVAL_TYPE_GLOBAL as i32)
     }
 
     /// Evaluate source with raw `JS_EVAL_*` flags.
-    pub fn eval_with_flags(&mut self, code: &[u8], filename: &str, flags: i32) -> JsResult<JsValue> {
+    pub fn eval_with_flags(
+        &mut self,
+        code: &[u8],
+        filename: &str,
+        flags: i32,
+    ) -> JsResult<JsValue> {
         let mut buf = Vec::with_capacity(code.len() + 1);
         buf.extend_from_slice(code);
         buf.push(0);
         let name = CString::new(filename.replace('\0', "")).unwrap_or_default();
-        let mut opts = qjs::JSEvalOptions { version: 1, eval_flags: flags, filename: name.as_ptr(), line_num: 1 };
-        let v = unsafe { qjs::JS_Eval2(self.raw, buf.as_ptr() as *const _, code.len() as _, &mut opts) };
+        let mut opts = qjs::JSEvalOptions {
+            version: 1,
+            eval_flags: flags,
+            filename: name.as_ptr(),
+            line_num: 1,
+        };
+        let v = unsafe {
+            qjs::JS_Eval2(
+                self.raw,
+                buf.as_ptr() as *const _,
+                code.len() as _,
+                &mut opts,
+            )
+        };
         check(self.raw, v)
     }
 
     /// Store per-engine data (one value per type).
     pub fn insert_data<T: 'static>(&mut self, value: T) {
-        engine().data.borrow_mut().insert(TypeId::of::<T>(), Box::new(value));
+        engine()
+            .data
+            .borrow_mut()
+            .insert(TypeId::of::<T>(), Box::new(value));
     }
 
     /// Per-engine data stored with [`Context::insert_data`].
@@ -1425,8 +1570,16 @@ fn register_intrinsics(raw: *mut qjs::JSContext) {
     let mut ctx = Context::from_raw(raw);
     let global = ctx.global_object();
     let mut pair = |name: &str| -> (JsObject, JsObject) {
-        let ctor = global.get(name, &mut ctx).ok().and_then(|v| v.as_object()).unwrap_or_else(JsObject::with_null_proto);
-        let proto = ctor.get("prototype", &mut ctx).ok().and_then(|v| v.as_object()).unwrap_or_else(JsObject::with_null_proto);
+        let ctor = global
+            .get(name, &mut ctx)
+            .ok()
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(JsObject::with_null_proto);
+        let proto = ctor
+            .get("prototype", &mut ctx)
+            .ok()
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(JsObject::with_null_proto);
         (ctor, proto)
     };
     let cache = IntrinsicsCache {
@@ -1436,7 +1589,10 @@ fn register_intrinsics(raw: *mut qjs::JSContext) {
         array: pair("Array"),
         promise: pair("Promise"),
     };
-    engine().intrinsics.borrow_mut().insert(raw as usize, Rc::new(cache));
+    engine()
+        .intrinsics
+        .borrow_mut()
+        .insert(raw as usize, Rc::new(cache));
 }
 
 /// The well-known intrinsic objects of a realm.
@@ -1447,7 +1603,12 @@ pub struct Intrinsics {
 
 impl Intrinsics {
     fn cache(&self) -> Rc<IntrinsicsCache> {
-        engine().intrinsics.borrow().get(&(self.ctx as usize)).cloned().expect("realm intrinsics")
+        engine()
+            .intrinsics
+            .borrow()
+            .get(&(self.ctx as usize))
+            .cloned()
+            .expect("realm intrinsics")
     }
     /// The standard constructors.
     pub fn constructors(&self) -> Constructors {
@@ -1529,7 +1690,9 @@ impl PropertyKey {
         let a = unsafe {
             match self {
                 PropertyKey::Index(i) => qjs::JS_NewAtomUInt32(ctx.raw, *i),
-                PropertyKey::Name(s) => qjs::JS_NewAtomLen(ctx.raw, s.as_ptr() as *const _, s.len() as _),
+                PropertyKey::Name(s) => {
+                    qjs::JS_NewAtomLen(ctx.raw, s.as_ptr() as *const _, s.len() as _)
+                }
                 PropertyKey::String(s) => qjs::JS_ValueToAtom(ctx.raw, s.0.0),
                 PropertyKey::Symbol(s) => qjs::JS_ValueToAtom(ctx.raw, s.0.0),
             }
@@ -1630,12 +1793,20 @@ impl From<u64> for PropertyKey {
 }
 impl From<i32> for PropertyKey {
     fn from(i: i32) -> Self {
-        if i >= 0 { PropertyKey::Index(i as u32) } else { PropertyKey::from(i.to_string()) }
+        if i >= 0 {
+            PropertyKey::Index(i as u32)
+        } else {
+            PropertyKey::from(i.to_string())
+        }
     }
 }
 impl From<i64> for PropertyKey {
     fn from(i: i64) -> Self {
-        if i >= 0 { PropertyKey::from(i as u64) } else { PropertyKey::from(i.to_string()) }
+        if i >= 0 {
+            PropertyKey::from(i as u64)
+        } else {
+            PropertyKey::from(i.to_string())
+        }
     }
 }
 
@@ -1786,7 +1957,12 @@ impl JsObject {
     /// An object with a `null` prototype.
     pub fn with_null_proto() -> JsObject {
         let ctx = main_ctx();
-        JsObject(check(ctx, unsafe { qjs::JS_NewObjectProto(ctx, JsValue::null().0) }).expect("out of memory"))
+        JsObject(
+            check(ctx, unsafe {
+                qjs::JS_NewObjectProto(ctx, JsValue::null().0)
+            })
+            .expect("out of memory"),
+        )
     }
 
     /// An ordinary object with the given prototype.
@@ -1801,7 +1977,10 @@ impl JsObject {
         let e = engine();
         let ctx = e.main.get();
         let p = proto.as_ref().map_or(JsValue::null().0, |p| p.0.0);
-        let v = check(ctx, unsafe { qjs::JS_NewObjectProtoClass(ctx, p, e.data_class) }).expect("out of memory");
+        let v = check(ctx, unsafe {
+            qjs::JS_NewObjectProtoClass(ctx, p, e.data_class)
+        })
+        .expect("out of memory");
         let b: Box<DataBox> = Box::new(DataBox(RefCell::new(Box::new(data))));
         unsafe { qjs::JS_SetOpaque(v.0, Box::into_raw(b) as *mut c_void) };
         JsObject(v)
@@ -1830,7 +2009,11 @@ impl JsObject {
 
     /// Whether the object owns Rust data of type `T`.
     pub fn is<T: 'static>(&self) -> bool {
-        self.data_box().is_some_and(|b| b.0.try_borrow().map(|d| d.as_any().is::<T>()).unwrap_or(false))
+        self.data_box().is_some_and(|b| {
+            b.0.try_borrow()
+                .map(|d| d.as_any().is::<T>())
+                .unwrap_or(false)
+        })
     }
 
     /// The raw value.
@@ -1846,11 +2029,19 @@ impl JsObject {
     /// `obj[key]`
     pub fn get<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<JsValue> {
         let atom = key.into().atom(ctx)?;
-        check(ctx.raw, unsafe { qjs::JS_GetProperty(ctx.raw, self.0.0, atom.0) })
+        check(ctx.raw, unsafe {
+            qjs::JS_GetProperty(ctx.raw, self.0.0, atom.0)
+        })
     }
 
     /// `obj[key] = value` (throws on failure, like strict mode code).
-    pub fn set<K: Into<PropertyKey>, V: Into<JsValue>>(&self, key: K, value: V, _throw: bool, ctx: &mut Context) -> JsResult<bool> {
+    pub fn set<K: Into<PropertyKey>, V: Into<JsValue>>(
+        &self,
+        key: K,
+        value: V,
+        _throw: bool,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
         let v = value.into().into_raw();
         let r = unsafe { qjs::JS_SetProperty(ctx.raw, self.0.0, atom.0, v) };
@@ -1858,23 +2049,48 @@ impl JsObject {
     }
 
     /// `CreateDataPropertyOrThrow`
-    pub fn create_data_property_or_throw<K: Into<PropertyKey>, V: Into<JsValue>>(&self, key: K, value: V, ctx: &mut Context) -> JsResult<bool> {
+    pub fn create_data_property_or_throw<K: Into<PropertyKey>, V: Into<JsValue>>(
+        &self,
+        key: K,
+        value: V,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
         let v = value.into().into_raw();
-        let r = unsafe { qjs::JS_DefinePropertyValue(ctx.raw, self.0.0, atom.0, v, (qjs::JS_PROP_C_W_E | qjs::JS_PROP_THROW) as i32) };
+        let r = unsafe {
+            qjs::JS_DefinePropertyValue(
+                ctx.raw,
+                self.0.0,
+                atom.0,
+                v,
+                (qjs::JS_PROP_C_W_E | qjs::JS_PROP_THROW) as i32,
+            )
+        };
         Ok(check_int(ctx.raw, r)? != 0)
     }
 
     /// `CreateDataProperty` (no throw on failure).
-    pub fn create_data_property<K: Into<PropertyKey>, V: Into<JsValue>>(&self, key: K, value: V, ctx: &mut Context) -> JsResult<bool> {
+    pub fn create_data_property<K: Into<PropertyKey>, V: Into<JsValue>>(
+        &self,
+        key: K,
+        value: V,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
         let v = value.into().into_raw();
-        let r = unsafe { qjs::JS_DefinePropertyValue(ctx.raw, self.0.0, atom.0, v, qjs::JS_PROP_C_W_E as i32) };
+        let r = unsafe {
+            qjs::JS_DefinePropertyValue(ctx.raw, self.0.0, atom.0, v, qjs::JS_PROP_C_W_E as i32)
+        };
         Ok(check_int(ctx.raw, r)? != 0)
     }
 
     /// `Object.defineProperty`
-    pub fn define_property_or_throw<K: Into<PropertyKey>, P: Into<PropertyDescriptor>>(&self, key: K, desc: P, ctx: &mut Context) -> JsResult<bool> {
+    pub fn define_property_or_throw<K: Into<PropertyKey>, P: Into<PropertyDescriptor>>(
+        &self,
+        key: K,
+        desc: P,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
         let d: PropertyDescriptor = desc.into();
         let mut flags = qjs::JS_PROP_THROW as i32;
@@ -1888,8 +2104,16 @@ impl JsObject {
             }
         };
         set_flag(qjs::JS_PROP_HAS_WRITABLE, qjs::JS_PROP_WRITABLE, d.writable);
-        set_flag(qjs::JS_PROP_HAS_ENUMERABLE, qjs::JS_PROP_ENUMERABLE, d.enumerable);
-        set_flag(qjs::JS_PROP_HAS_CONFIGURABLE, qjs::JS_PROP_CONFIGURABLE, d.configurable);
+        set_flag(
+            qjs::JS_PROP_HAS_ENUMERABLE,
+            qjs::JS_PROP_ENUMERABLE,
+            d.enumerable,
+        );
+        set_flag(
+            qjs::JS_PROP_HAS_CONFIGURABLE,
+            qjs::JS_PROP_CONFIGURABLE,
+            d.configurable,
+        );
         if d.value.is_some() {
             flags |= qjs::JS_PROP_HAS_VALUE as i32;
         }
@@ -1902,24 +2126,38 @@ impl JsObject {
         let value = d.value.as_ref().unwrap_or(&undefined);
         let get = d.get.as_ref().unwrap_or(&undefined);
         let set = d.set.as_ref().unwrap_or(&undefined);
-        let r = unsafe { qjs::JS_DefineProperty(ctx.raw, self.0.0, atom.0, value.0, get.0, set.0, flags) };
+        let r = unsafe {
+            qjs::JS_DefineProperty(ctx.raw, self.0.0, atom.0, value.0, get.0, set.0, flags)
+        };
         Ok(check_int(ctx.raw, r)? != 0)
     }
 
     /// `key in obj`
     pub fn has_property<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
-        Ok(check_int(ctx.raw, unsafe { qjs::JS_HasProperty(ctx.raw, self.0.0, atom.0) })? != 0)
+        Ok(check_int(ctx.raw, unsafe {
+            qjs::JS_HasProperty(ctx.raw, self.0.0, atom.0)
+        })? != 0)
     }
 
     /// `Object.hasOwn(obj, key)`
-    pub fn has_own_property<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<bool> {
+    pub fn has_own_property<K: Into<PropertyKey>>(
+        &self,
+        key: K,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
-        Ok(check_int(ctx.raw, unsafe { qjs::JS_GetOwnProperty(ctx.raw, ptr::null_mut(), self.0.0, atom.0) })? != 0)
+        Ok(check_int(ctx.raw, unsafe {
+            qjs::JS_GetOwnProperty(ctx.raw, ptr::null_mut(), self.0.0, atom.0)
+        })? != 0)
     }
 
     /// Own property descriptor (`None` if absent).
-    pub fn get_own_property<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<Option<PropertyDescriptor>> {
+    pub fn get_own_property<K: Into<PropertyKey>>(
+        &self,
+        key: K,
+        ctx: &mut Context,
+    ) -> JsResult<Option<PropertyDescriptor>> {
         let atom = key.into().atom(ctx)?;
         let mut desc = qjs::JSPropertyDescriptor {
             flags: 0,
@@ -1927,11 +2165,19 @@ impl JsObject {
             getter: JsValue::undefined().0,
             setter: JsValue::undefined().0,
         };
-        let r = check_int(ctx.raw, unsafe { qjs::JS_GetOwnProperty(ctx.raw, &mut desc, self.0.0, atom.0) })?;
+        let r = check_int(ctx.raw, unsafe {
+            qjs::JS_GetOwnProperty(ctx.raw, &mut desc, self.0.0, atom.0)
+        })?;
         if r == 0 {
             return Ok(None);
         }
-        let (value, getter, setter) = unsafe { (JsValue::from_raw(desc.value), JsValue::from_raw(desc.getter), JsValue::from_raw(desc.setter)) };
+        let (value, getter, setter) = unsafe {
+            (
+                JsValue::from_raw(desc.value),
+                JsValue::from_raw(desc.getter),
+                JsValue::from_raw(desc.setter),
+            )
+        };
         let f = desc.flags as u32;
         let accessor = f & qjs::JS_PROP_GETSET != 0;
         Ok(Some(PropertyDescriptor {
@@ -1945,25 +2191,39 @@ impl JsObject {
     }
 
     /// `delete obj[key]` (throws when the property is not configurable).
-    pub fn delete_property_or_throw<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<bool> {
+    pub fn delete_property_or_throw<K: Into<PropertyKey>>(
+        &self,
+        key: K,
+        ctx: &mut Context,
+    ) -> JsResult<bool> {
         let atom = key.into().atom(ctx)?;
-        Ok(check_int(ctx.raw, unsafe { qjs::JS_DeleteProperty(ctx.raw, self.0.0, atom.0, qjs::JS_PROP_THROW as i32) })? != 0)
+        Ok(check_int(ctx.raw, unsafe {
+            qjs::JS_DeleteProperty(ctx.raw, self.0.0, atom.0, qjs::JS_PROP_THROW as i32)
+        })? != 0)
     }
 
     /// Own property keys (strings in order, then symbols), like `Reflect.ownKeys`.
     pub fn own_property_keys(&self, ctx: &mut Context) -> JsResult<Vec<PropertyKey>> {
-        self.own_keys(ctx, (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_SYMBOL_MASK) as i32)
+        self.own_keys(
+            ctx,
+            (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_SYMBOL_MASK) as i32,
+        )
     }
 
     /// Own enumerable string keys, like `Object.keys`.
     pub fn own_enumerable_string_keys(&self, ctx: &mut Context) -> JsResult<Vec<PropertyKey>> {
-        self.own_keys(ctx, (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_ENUM_ONLY) as i32)
+        self.own_keys(
+            ctx,
+            (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_ENUM_ONLY) as i32,
+        )
     }
 
     fn own_keys(&self, ctx: &mut Context, flags: i32) -> JsResult<Vec<PropertyKey>> {
         let mut tab: *mut qjs::JSPropertyEnum = ptr::null_mut();
         let mut len: u32 = 0;
-        check_int(ctx.raw, unsafe { qjs::JS_GetOwnPropertyNames(ctx.raw, &mut tab, &mut len, self.0.0, flags) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_GetOwnPropertyNames(ctx.raw, &mut tab, &mut len, self.0.0, flags)
+        })?;
         let mut keys = Vec::with_capacity(len as usize);
         for i in 0..len as usize {
             let atom = unsafe { (*tab.add(i)).atom };
@@ -1976,15 +2236,36 @@ impl JsObject {
     /// Call as a function.
     pub fn call(&self, this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
         let mut argv: Vec<qjs::JSValue> = args.iter().map(|a| a.0).collect();
-        let v = unsafe { qjs::JS_Call(ctx.raw, self.0.0, this.0, argv.len() as c_int, argv.as_mut_ptr()) };
+        let v = unsafe {
+            qjs::JS_Call(
+                ctx.raw,
+                self.0.0,
+                this.0,
+                argv.len() as c_int,
+                argv.as_mut_ptr(),
+            )
+        };
         check(ctx.raw, v)
     }
 
     /// `new obj(...args)` (with an optional `new.target`).
-    pub fn construct(&self, args: &[JsValue], new_target: Option<&JsObject>, ctx: &mut Context) -> JsResult<JsObject> {
+    pub fn construct(
+        &self,
+        args: &[JsValue],
+        new_target: Option<&JsObject>,
+        ctx: &mut Context,
+    ) -> JsResult<JsObject> {
         let mut argv: Vec<qjs::JSValue> = args.iter().map(|a| a.0).collect();
         let target = new_target.map_or(self.0.0, |t| t.0.0);
-        let v = unsafe { qjs::JS_CallConstructor2(ctx.raw, self.0.0, target, argv.len() as c_int, argv.as_mut_ptr()) };
+        let v = unsafe {
+            qjs::JS_CallConstructor2(
+                ctx.raw,
+                self.0.0,
+                target,
+                argv.len() as c_int,
+                argv.as_mut_ptr(),
+            )
+        };
         Ok(JsObject(check(ctx.raw, v)?))
     }
 
@@ -2120,12 +2401,16 @@ impl NativeFunction {
     ///
     /// # Safety
     /// Kept `unsafe` for parity with the original API; it is memory safe.
-    pub unsafe fn from_closure(f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + 'static) -> Self {
+    pub unsafe fn from_closure(
+        f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + 'static,
+    ) -> Self {
         NativeFunction(Rc::new(f))
     }
 
     /// From a `Copy` closure.
-    pub fn from_copy_closure(f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + Copy + 'static) -> Self {
+    pub fn from_copy_closure(
+        f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + Copy + 'static,
+    ) -> Self {
         NativeFunction(Rc::new(f))
     }
 
@@ -2134,11 +2419,17 @@ impl NativeFunction {
         f: impl Fn(&JsValue, &[JsValue], &T, &mut Context) -> JsResult<JsValue> + Copy + 'static,
         captures: T,
     ) -> Self {
-        NativeFunction(Rc::new(move |this: &JsValue, args: &[JsValue], ctx: &mut Context| f(this, args, &captures, ctx)))
+        NativeFunction(Rc::new(
+            move |this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                f(this, args, &captures, ctx)
+            },
+        ))
     }
 
     /// From any closure (safe constructor).
-    pub fn from_fn(f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + 'static) -> Self {
+    pub fn from_fn(
+        f: impl Fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + 'static,
+    ) -> Self {
         NativeFunction(Rc::new(f))
     }
 
@@ -2170,10 +2461,15 @@ unsafe extern "C" fn fn_call(
     let e = engine();
     let p = unsafe { qjs::JS_GetOpaque(func_obj, e.fn_class) } as *const FnBox;
     if p.is_null() {
-        return throw(ctx, JsNativeError::typ().with_message("not a function").into());
+        return throw(
+            ctx,
+            JsNativeError::typ().with_message("not a function").into(),
+        );
     }
     let f = unsafe { &*p }.0.clone();
-    let args: Vec<JsValue> = (0..argc.max(0) as usize).map(|i| unsafe { JsValue::from_raw_dup(*argv.add(i)) }).collect();
+    let args: Vec<JsValue> = (0..argc.max(0) as usize)
+        .map(|i| unsafe { JsValue::from_raw_dup(*argv.add(i)) })
+        .collect();
     let this = unsafe { JsValue::from_raw_dup(this_val) };
     let mut c = Context::from_raw(ctx);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&this, &args, &mut c)));
@@ -2183,7 +2479,12 @@ unsafe extern "C" fn fn_call(
         Err(panic) => {
             let msg = panic_message(&*panic);
             tracing::error!(target: "pi_quickjs", "panic in native function: {msg}");
-            throw(ctx, JsNativeError::internal().with_message(format!("panic in native function: {msg}")).into())
+            throw(
+                ctx,
+                JsNativeError::internal()
+                    .with_message(format!("panic in native function: {msg}"))
+                    .into(),
+            )
         }
     }
 }
@@ -2200,7 +2501,13 @@ pub struct FunctionObjectBuilder {
 impl FunctionObjectBuilder {
     /// Start a function in `realm`.
     pub fn new(realm: &Realm, f: NativeFunction) -> Self {
-        FunctionObjectBuilder { realm: realm.clone(), f, name: None, length: 0, constructor: false }
+        FunctionObjectBuilder {
+            realm: realm.clone(),
+            f,
+            name: None,
+            length: 0,
+            constructor: false,
+        }
     }
     /// `name`
     pub fn name(mut self, name: impl Into<JsString>) -> Self {
@@ -2222,7 +2529,10 @@ impl FunctionObjectBuilder {
         let e = engine();
         let raw = self.realm.0;
         let proto = unsafe { JsValue::from_raw(qjs::JS_GetFunctionProto(raw)) };
-        let v = check(raw, unsafe { qjs::JS_NewObjectProtoClass(raw, proto.0, e.fn_class) }).expect("out of memory");
+        let v = check(raw, unsafe {
+            qjs::JS_NewObjectProtoClass(raw, proto.0, e.fn_class)
+        })
+        .expect("out of memory");
         let b = Box::new(FnBox(self.f.0));
         unsafe {
             qjs::JS_SetOpaque(v.0, Box::into_raw(b) as *mut c_void);
@@ -2233,8 +2543,18 @@ impl FunctionObjectBuilder {
         let obj = JsObject(v);
         let mut ctx = Context::from_raw(raw);
         let name = self.name.unwrap_or_else(|| JsString::from(""));
-        let desc = |v: JsValue| PropertyDescriptor::builder().value(v).writable(false).enumerable(false).configurable(true);
-        let _ = obj.define_property_or_throw("length", desc(JsValue::from(self.length as f64)), &mut ctx);
+        let desc = |v: JsValue| {
+            PropertyDescriptor::builder()
+                .value(v)
+                .writable(false)
+                .enumerable(false)
+                .configurable(true)
+        };
+        let _ = obj.define_property_or_throw(
+            "length",
+            desc(JsValue::from(self.length as f64)),
+            &mut ctx,
+        );
         let _ = obj.define_property_or_throw("name", desc(name.into()), &mut ctx);
         JsFunction(obj)
     }
@@ -2251,7 +2571,9 @@ pub struct JsArray(JsObject);
 impl JsArray {
     /// `[]`
     pub fn new(ctx: &mut Context) -> JsArray {
-        JsArray(JsObject(check(ctx.raw, unsafe { qjs::JS_NewArray(ctx.raw) }).expect("out of memory")))
+        JsArray(JsObject(
+            check(ctx.raw, unsafe { qjs::JS_NewArray(ctx.raw) }).expect("out of memory"),
+        ))
     }
 
     /// An array of `items`.
@@ -2268,14 +2590,18 @@ impl JsArray {
         if obj.is_array() {
             Ok(JsArray(obj))
         } else {
-            Err(JsNativeError::typ().with_message("object is not an Array").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not an Array")
+                .into())
         }
     }
 
     /// `array.length`
     pub fn length(&self, ctx: &mut Context) -> JsResult<u64> {
         let mut n = 0i64;
-        check_int(ctx.raw, unsafe { qjs::JS_GetLength(ctx.raw, self.0.0.0, &mut n) })?;
+        check_int(ctx.raw, unsafe {
+            qjs::JS_GetLength(ctx.raw, self.0.0.0, &mut n)
+        })?;
         Ok(n.max(0) as u64)
     }
 
@@ -2287,8 +2613,16 @@ impl JsArray {
     /// `array.at(index)`
     pub fn at<I: Into<i64>>(&self, index: I, ctx: &mut Context) -> JsResult<JsValue> {
         let i = index.into();
-        let i = if i < 0 { self.length(ctx)? as i64 + i } else { i };
-        if i < 0 { Ok(JsValue::undefined()) } else { self.0.get(i, ctx) }
+        let i = if i < 0 {
+            self.length(ctx)? as i64 + i
+        } else {
+            i
+        };
+        if i < 0 {
+            Ok(JsValue::undefined())
+        } else {
+            self.0.get(i, ctx)
+        }
     }
 
     /// `array.push(value)`
@@ -2328,7 +2662,12 @@ impl From<JsArray> for JsObject {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsArrayBuffer(JsObject);
 
-unsafe extern "C" fn vec_realloc(_rt: *mut qjs::JSRuntime, opaque: *mut c_void, ptr: *mut c_void, size: qjs::size_t) -> *mut c_void {
+unsafe extern "C" fn vec_realloc(
+    _rt: *mut qjs::JSRuntime,
+    opaque: *mut c_void,
+    ptr: *mut c_void,
+    size: qjs::size_t,
+) -> *mut c_void {
     // Used for buffers created from a `Vec<u8>`: `opaque` is the original capacity. Only frees
     // (size 0) are expected since these buffers are not resizable.
     if size == 0 {
@@ -2341,7 +2680,12 @@ unsafe extern "C" fn vec_realloc(_rt: *mut qjs::JSRuntime, opaque: *mut c_void, 
     ptr::null_mut()
 }
 
-unsafe extern "C" fn external_realloc(_rt: *mut qjs::JSRuntime, _opaque: *mut c_void, _ptr: *mut c_void, _size: qjs::size_t) -> *mut c_void {
+unsafe extern "C" fn external_realloc(
+    _rt: *mut qjs::JSRuntime,
+    _opaque: *mut c_void,
+    _ptr: *mut c_void,
+    _size: qjs::size_t,
+) -> *mut c_void {
     // External memory is owned by Rust: nothing to free, and it is never resized.
     ptr::null_mut()
 }
@@ -2352,8 +2696,22 @@ impl JsArrayBuffer {
     /// # Safety
     /// `ptr..ptr + len` must stay valid while the buffer is attached; detach it (see
     /// [`JsArrayBuffer::detach_in_place`]) or drop the engine before freeing the memory.
-    pub unsafe fn from_external(ptr: *mut u8, len: usize, ctx: &mut Context) -> JsResult<JsArrayBuffer> {
-        let v = unsafe { qjs::JS_NewArrayBuffer(ctx.raw, ptr, len as _, len as _, Some(external_realloc as _), ptr::null_mut(), false) };
+    pub unsafe fn from_external(
+        ptr: *mut u8,
+        len: usize,
+        ctx: &mut Context,
+    ) -> JsResult<JsArrayBuffer> {
+        let v = unsafe {
+            qjs::JS_NewArrayBuffer(
+                ctx.raw,
+                ptr,
+                len as _,
+                len as _,
+                Some(external_realloc as _),
+                ptr::null_mut(),
+                false,
+            )
+        };
         Ok(JsArrayBuffer(JsObject(check(ctx.raw, v)?)))
     }
 
@@ -2370,12 +2728,24 @@ impl JsArrayBuffer {
     /// A buffer owning `bytes` (no copy).
     pub fn from_byte_block(bytes: Vec<u8>, ctx: &mut Context) -> JsResult<JsArrayBuffer> {
         if bytes.is_empty() {
-            let v = check(ctx.raw, unsafe { qjs::JS_NewArrayBufferCopy(ctx.raw, ptr::null(), 0) })?;
+            let v = check(ctx.raw, unsafe {
+                qjs::JS_NewArrayBufferCopy(ctx.raw, ptr::null(), 0)
+            })?;
             return Ok(JsArrayBuffer(JsObject(v)));
         }
         let mut bytes = std::mem::ManuallyDrop::new(bytes);
         let (p, len, cap) = (bytes.as_mut_ptr(), bytes.len(), bytes.capacity());
-        let v = unsafe { qjs::JS_NewArrayBuffer(ctx.raw, p, len as _, len as _, Some(vec_realloc as _), cap as *mut c_void, false) };
+        let v = unsafe {
+            qjs::JS_NewArrayBuffer(
+                ctx.raw,
+                p,
+                len as _,
+                len as _,
+                Some(vec_realloc as _),
+                cap as *mut c_void,
+                false,
+            )
+        };
         match check(ctx.raw, v) {
             Ok(v) => Ok(JsArrayBuffer(JsObject(v))),
             Err(e) => {
@@ -2387,7 +2757,9 @@ impl JsArrayBuffer {
 
     /// A copy of `bytes`.
     pub fn from_slice(bytes: &[u8], ctx: &mut Context) -> JsResult<JsArrayBuffer> {
-        let v = check(ctx.raw, unsafe { qjs::JS_NewArrayBufferCopy(ctx.raw, bytes.as_ptr(), bytes.len() as _) })?;
+        let v = check(ctx.raw, unsafe {
+            qjs::JS_NewArrayBufferCopy(ctx.raw, bytes.as_ptr(), bytes.len() as _)
+        })?;
         Ok(JsArrayBuffer(JsObject(v)))
     }
 
@@ -2396,7 +2768,9 @@ impl JsArrayBuffer {
         if unsafe { qjs::JS_IsArrayBuffer(obj.0.0) } {
             Ok(JsArrayBuffer(obj))
         } else {
-            Err(JsNativeError::typ().with_message("object is not an ArrayBuffer").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not an ArrayBuffer")
+                .into())
         }
     }
 
@@ -2441,7 +2815,10 @@ impl JsArrayBuffer {
 
     /// Detach the buffer, returning its bytes.
     pub fn detach(&self, _key: &JsValue) -> JsResult<Vec<u8>> {
-        let data = self.data().map(|d| d.to_vec()).ok_or_else(|| JsNativeError::typ().with_message("ArrayBuffer is detached"))?;
+        let data = self
+            .data()
+            .map(|d| d.to_vec())
+            .ok_or_else(|| JsNativeError::typ().with_message("ArrayBuffer is detached"))?;
         unsafe { qjs::JS_DetachArrayBuffer(main_ctx(), self.0.0.0) };
         Ok(data)
     }
@@ -2450,10 +2827,16 @@ impl JsArrayBuffer {
     pub fn with_max_byte_length(self, max: u64, ctx: &mut Context) -> JsResult<JsArrayBuffer> {
         let data = self.data().map(|d| d.to_vec()).unwrap_or_default();
         let ctor = ctx.global_object().get("ArrayBuffer", ctx)?;
-        let ctor = ctor.as_object().ok_or_else(|| JsNativeError::typ().with_message("ArrayBuffer missing"))?;
+        let ctor = ctor
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("ArrayBuffer missing"))?;
         let opts = JsObject::with_object_proto(ctx.intrinsics());
         opts.set("maxByteLength", JsValue::from(max as f64), true, ctx)?;
-        let ab = JsArrayBuffer::from_object(ctor.construct(&[JsValue::from(data.len() as f64), opts.into()], None, ctx)?)?;
+        let ab = JsArrayBuffer::from_object(ctor.construct(
+            &[JsValue::from(data.len() as f64), opts.into()],
+            None,
+            ctx,
+        )?)?;
         if let Some(d) = ab.data_mut() {
             d.copy_from_slice(&data);
         }
@@ -2570,7 +2953,9 @@ impl JsTypedArray {
         if unsafe { qjs::JS_GetTypedArrayType(obj.0.0) } >= 0 {
             Ok(JsTypedArray(obj))
         } else {
-            Err(JsNativeError::typ().with_message("object is not a TypedArray").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not a TypedArray")
+                .into())
         }
     }
 
@@ -2581,7 +2966,9 @@ impl JsTypedArray {
 
     fn parts(&self, ctx: &mut Context) -> JsResult<(JsValue, usize, usize)> {
         let (mut off, mut len, mut bpe): (qjs::size_t, qjs::size_t, qjs::size_t) = (0, 0, 0);
-        let ab = check(ctx.raw, unsafe { qjs::JS_GetTypedArrayBuffer(ctx.raw, self.0.0.0, &mut off, &mut len, &mut bpe) })?;
+        let ab = check(ctx.raw, unsafe {
+            qjs::JS_GetTypedArrayBuffer(ctx.raw, self.0.0.0, &mut off, &mut len, &mut bpe)
+        })?;
         Ok((ab, off as usize, len as usize))
     }
 
@@ -2613,8 +3000,16 @@ impl JsTypedArray {
         let (ab, _, _) = self.parts(ctx)?;
         let off = self.byte_offset(ctx)?;
         let len = self.byte_length(ctx)?;
-        let Some(ab) = ab.as_object().and_then(|o| JsArrayBuffer::from_object(o).ok()) else { return Ok(None) };
-        Ok(ab.data().and_then(|d| d.get(off..off + len)).map(|s| s.to_vec()))
+        let Some(ab) = ab
+            .as_object()
+            .and_then(|o| JsArrayBuffer::from_object(o).ok())
+        else {
+            return Ok(None);
+        };
+        Ok(ab
+            .data()
+            .and_then(|d| d.get(off..off + len))
+            .map(|s| s.to_vec()))
     }
 }
 
@@ -2645,12 +3040,22 @@ impl JsUint8Array {
     /// A view of the whole buffer.
     pub fn from_array_buffer(ab: JsArrayBuffer, ctx: &mut Context) -> JsResult<JsUint8Array> {
         let mut argv = [ab.0.0.0];
-        let v = check(ctx.raw, unsafe { qjs::JS_NewTypedArray(ctx.raw, 1, argv.as_mut_ptr(), qjs::JSTypedArrayEnum_JS_TYPED_ARRAY_UINT8) })?;
+        let v = check(ctx.raw, unsafe {
+            qjs::JS_NewTypedArray(
+                ctx.raw,
+                1,
+                argv.as_mut_ptr(),
+                qjs::JSTypedArrayEnum_JS_TYPED_ARRAY_UINT8,
+            )
+        })?;
         Ok(JsUint8Array(JsTypedArray(JsObject(v))))
     }
 
     /// A new array holding `bytes`.
-    pub fn from_iter<I: IntoIterator<Item = u8>>(bytes: I, ctx: &mut Context) -> JsResult<JsUint8Array> {
+    pub fn from_iter<I: IntoIterator<Item = u8>>(
+        bytes: I,
+        ctx: &mut Context,
+    ) -> JsResult<JsUint8Array> {
         let bytes: Vec<u8> = bytes.into_iter().collect();
         Self::from_vec(bytes, ctx)
     }
@@ -2672,7 +3077,9 @@ impl JsUint8Array {
         if ta.kind() == Some(TypedArrayKind::Uint8) {
             Ok(JsUint8Array(ta))
         } else {
-            Err(JsNativeError::typ().with_message("object is not a Uint8Array").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not a Uint8Array")
+                .into())
         }
     }
 }
@@ -2706,7 +3113,9 @@ impl JsDataView {
         if unsafe { qjs::JS_IsDataView(obj.0.0) } {
             Ok(JsDataView(obj))
         } else {
-            Err(JsNativeError::typ().with_message("object is not a DataView").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not a DataView")
+                .into())
         }
     }
     /// `dv.buffer`
@@ -2758,11 +3167,18 @@ impl JsPromise {
     /// A pending promise and its resolving functions.
     pub fn new_pending(ctx: &mut Context) -> (JsPromise, ResolvingFunctions) {
         let mut funcs = [JsValue::undefined().0, JsValue::undefined().0];
-        let p = check(ctx.raw, unsafe { qjs::JS_NewPromiseCapability(ctx.raw, funcs.as_mut_ptr()) }).expect("out of memory");
-        let (resolve, reject) = unsafe { (JsValue::from_raw(funcs[0]), JsValue::from_raw(funcs[1])) };
+        let p = check(ctx.raw, unsafe {
+            qjs::JS_NewPromiseCapability(ctx.raw, funcs.as_mut_ptr())
+        })
+        .expect("out of memory");
+        let (resolve, reject) =
+            unsafe { (JsValue::from_raw(funcs[0]), JsValue::from_raw(funcs[1])) };
         (
             JsPromise(JsObject(p)),
-            ResolvingFunctions { resolve: JsFunction(JsObject(resolve)), reject: JsFunction(JsObject(reject)) },
+            ResolvingFunctions {
+                resolve: JsFunction(JsObject(resolve)),
+                reject: JsFunction(JsObject(reject)),
+            },
         )
     }
 
@@ -2771,14 +3187,17 @@ impl JsPromise {
         if unsafe { qjs::JS_IsPromise(obj.0.0) } {
             Ok(JsPromise(obj))
         } else {
-            Err(JsNativeError::typ().with_message("object is not a Promise").into())
+            Err(JsNativeError::typ()
+                .with_message("object is not a Promise")
+                .into())
         }
     }
 
     /// A promise resolved with `value`.
     pub fn resolve(value: impl Into<JsValue>, ctx: &mut Context) -> JsResult<JsPromise> {
         let (p, f) = JsPromise::new_pending(ctx);
-        f.resolve.call(&JsValue::undefined(), &[value.into()], ctx)?;
+        f.resolve
+            .call(&JsValue::undefined(), &[value.into()], ctx)?;
         Ok(p)
     }
 
@@ -2795,20 +3214,32 @@ impl JsPromise {
         let ctx = main_ctx();
         let s = unsafe { qjs::JS_PromiseState(ctx, self.0.0.0) };
         match s {
-            qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED => {
-                PromiseState::Fulfilled(unsafe { JsValue::from_raw(qjs::JS_PromiseResult(ctx, self.0.0.0)) })
-            }
-            qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED => {
-                PromiseState::Rejected(unsafe { JsValue::from_raw(qjs::JS_PromiseResult(ctx, self.0.0.0)) })
-            }
+            qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED => PromiseState::Fulfilled(unsafe {
+                JsValue::from_raw(qjs::JS_PromiseResult(ctx, self.0.0.0))
+            }),
+            qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED => PromiseState::Rejected(unsafe {
+                JsValue::from_raw(qjs::JS_PromiseResult(ctx, self.0.0.0))
+            }),
             _ => PromiseState::Pending,
         }
     }
 
     /// `promise.then(onFulfilled, onRejected)`
-    pub fn then(&self, on_fulfilled: Option<JsFunction>, on_rejected: Option<JsFunction>, ctx: &mut Context) -> JsResult<JsPromise> {
-        let then = ctx.intrinsics().constructors().promise().prototype().get("then", ctx)?;
-        let then = then.as_object().ok_or_else(|| JsNativeError::typ().with_message("Promise.prototype.then missing"))?;
+    pub fn then(
+        &self,
+        on_fulfilled: Option<JsFunction>,
+        on_rejected: Option<JsFunction>,
+        ctx: &mut Context,
+    ) -> JsResult<JsPromise> {
+        let then = ctx
+            .intrinsics()
+            .constructors()
+            .promise()
+            .prototype()
+            .get("then", ctx)?;
+        let then = then
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("Promise.prototype.then missing"))?;
         let args = [
             on_fulfilled.map_or_else(JsValue::undefined, JsValue::from),
             on_rejected.map_or_else(JsValue::undefined, JsValue::from),

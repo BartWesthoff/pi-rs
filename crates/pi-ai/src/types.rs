@@ -25,12 +25,10 @@ pub use crate::providers::model_schema::{
     ModelImageResizeOptions, ModelInputLimits, ModelInputModality, ModelPromptCache,
     ModelThinkingLevel, ThinkingLevel, ThinkingLevelMap,
 };
+use crate::serde_util::{deserialize_some, js_f64, lax_i64, lax_u64, null_as_default, opt_lax_u64};
 pub use crate::utils::diagnostics::AssistantMessageDiagnostic;
 pub use crate::utils::event_stream::AssistantMessageEventStream;
 pub use crate::utils::identity::ClientIdentity;
-use crate::serde_util::{
-    deserialize_some, js_f64, lax_i64, lax_u64, null_as_default, opt_lax_u64,
-};
 
 // ---------------------------------------------------------------------------
 // API / provider identifiers
@@ -182,15 +180,13 @@ pub struct ProviderResponse {
 
 /// Callback for inspecting or replacing provider payloads before sending.
 /// Return `None` to keep the payload unchanged.
-pub type OnPayload =
-    Arc<dyn Fn(Value, Model) -> BoxFuture<'static, Option<Value>> + Send + Sync>;
+pub type OnPayload = Arc<dyn Fn(Value, Model) -> BoxFuture<'static, Option<Value>> + Send + Sync>;
 /// Callback invoked after an HTTP response is received and before its body is consumed.
 pub type OnResponse = Arc<dyn Fn(ProviderResponse, Model) -> BoxFuture<'static, ()> + Send + Sync>;
 /// Observer for each parsed provider stream event before normalization. Providers await the
 /// returned future before processing the event, so slow observers delay stream consumption
 /// (TypeScript `onProviderStreamEvent` returning a promise).
-pub type OnProviderStreamEvent =
-    Arc<dyn Fn(Value, Model) -> BoxFuture<'static, ()> + Send + Sync>;
+pub type OnProviderStreamEvent = Arc<dyn Fn(Value, Model) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Deferred-response request window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -289,11 +285,20 @@ impl fmt::Debug for StreamOptions {
             .field("signal", &self.signal.as_ref().map(|s| s.is_cancelled()))
             .field("telemetry", &self.telemetry.is_some())
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("env", &self.env.as_ref().map(|e| e.keys().collect::<Vec<_>>()))
+            .field(
+                "env",
+                &self.env.as_ref().map(|e| e.keys().collect::<Vec<_>>()),
+            )
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
-            .field("on_provider_stream_event", &self.on_provider_stream_event.is_some())
-            .field("headers", &self.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()))
+            .field(
+                "on_provider_stream_event",
+                &self.on_provider_stream_event.is_some(),
+            )
+            .field(
+                "headers",
+                &self.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
+            )
             .field("identity", &self.identity)
             .field("timeout_ms", &self.timeout_ms)
             .field("max_retries", &self.max_retries)
@@ -350,7 +355,10 @@ pub struct TextContent {
 
 impl TextContent {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), ..Default::default() }
+        Self {
+            text: text.into(),
+            ..Default::default()
+        }
     }
     /// Upstream's `text.trim().length === 0` before sanitizing.
     pub fn is_blank(&self) -> bool {
@@ -387,7 +395,10 @@ pub struct ThinkingContent {
 
 impl ThinkingContent {
     pub fn new(thinking: impl Into<String>) -> Self {
-        Self { thinking: thinking.into(), ..Default::default() }
+        Self {
+            thinking: thinking.into(),
+            ..Default::default()
+        }
     }
     /// Upstream's `thinking.trim().length === 0` before sanitizing.
     pub fn is_blank(&self) -> bool {
@@ -599,7 +610,12 @@ pub struct Usage {
     #[serde(with = "lax_u64")]
     pub cache_write: u64,
     /// Subset of `cache_write` written with 1h retention. Only Anthropic reports this split.
-    #[serde(rename = "cacheWrite1h", default, skip_serializing_if = "Option::is_none", with = "opt_lax_u64")]
+    #[serde(
+        rename = "cacheWrite1h",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_lax_u64"
+    )]
     pub cache_write_1h: Option<u64>,
     /// Reasoning tokens, a subset of `output`, when the provider reports them.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_lax_u64")]
@@ -662,7 +678,11 @@ pub struct DeferredHandle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_after_ms: Option<u64>,
     /// Provider conversion data required to reconstruct the final assistant message.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub data: Option<Value>,
 }
 
@@ -711,14 +731,16 @@ impl SystemMessage {
     pub fn content_lone_surrogates_removed(&self) -> bool {
         match &self.content {
             SystemContent::Text(_) => self.content_lone_surrogates_removed,
-            SystemContent::Blocks(blocks) => {
-                blocks.iter().any(|SystemTextBlock::Text(block)| block.lone_surrogates_removed)
-            }
+            SystemContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|SystemTextBlock::Text(block)| block.lone_surrogates_removed),
         }
     }
     /// Whether section `name`'s value lost unpaired surrogates.
     pub fn section_lone_surrogates_removed(&self, name: &str) -> bool {
-        self.sections_lone_surrogates_removed.iter().any(|removed| removed == name)
+        self.sections_lone_surrogates_removed
+            .iter()
+            .any(|removed| removed == name)
     }
 }
 
@@ -785,8 +807,15 @@ impl<'de> Deserialize<'de> for SystemMessage {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let map = Map::<String, Value>::deserialize(deserializer)?;
         let position = |key: &str| map.keys().position(|k| k == key);
-        let timestamp_last = match (position("timestamp"), position("toolsAdded"), position("toolsRemoved")) {
-            (Some(timestamp), added, removed) => added.into_iter().chain(removed).any(|tools| tools < timestamp),
+        let timestamp_last = match (
+            position("timestamp"),
+            position("toolsAdded"),
+            position("toolsRemoved"),
+        ) {
+            (Some(timestamp), added, removed) => added
+                .into_iter()
+                .chain(removed)
+                .any(|tools| tools < timestamp),
             _ => false,
         };
         let wire = SystemMessageWire::deserialize(Value::Object(map)).map_err(D::Error::custom)?;
@@ -807,7 +836,9 @@ impl<'de> Deserialize<'de> for SystemMessage {
 pub struct UserMessage {
     #[serde(default, deserialize_with = "null_as_default")]
     pub content: UserContent,
-    #[serde(with = "lax_i64")]
+    /// Lax like the TS runtime: extensions build user messages without a timestamp (e.g. in
+    /// `context` handlers), which read as 0.
+    #[serde(default, with = "lax_i64")]
     pub timestamp: i64,
     /// For string `content`, as [`TextContent::lone_surrogates_removed`].
     #[serde(skip)]
@@ -816,7 +847,11 @@ pub struct UserMessage {
 
 impl UserMessage {
     pub fn new(content: impl Into<UserContent>, timestamp: i64) -> Self {
-        Self { content: content.into(), timestamp, lone_surrogates_removed: false }
+        Self {
+            content: content.into(),
+            timestamp,
+            lone_surrogates_removed: false,
+        }
     }
 }
 
@@ -889,7 +924,9 @@ impl AssistantMessage {
     }
 
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
-        self.content.iter().filter_map(AssistantContent::as_tool_call)
+        self.content
+            .iter()
+            .filter_map(AssistantContent::as_tool_call)
     }
 }
 
@@ -932,7 +969,11 @@ pub struct ToolResultMessage {
     #[serde(default, deserialize_with = "null_as_default")]
     pub content: Vec<UserContentBlock>,
     /// Tool-specific JSON details. An explicit `null` is preserved.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub details: Option<Value>,
     /// Usage from the tool execution itself, if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1087,9 +1128,18 @@ pub struct ClassifierBoolCriteria {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ClassifierQuestion {
-    Choice { instructions: String, criteria: IndexMap<String, String> },
-    Score { instructions: String, criteria: Vec<String> },
-    Bool { instructions: String, criteria: ClassifierBoolCriteria },
+    Choice {
+        instructions: String,
+        criteria: IndexMap<String, String>,
+    },
+    Score {
+        instructions: String,
+        criteria: Vec<String>,
+    },
+    Bool {
+        instructions: String,
+        criteria: ClassifierBoolCriteria,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1204,7 +1254,9 @@ impl<'de> Deserialize<'de> for ConstrainedSampling {
         let value = Value::deserialize(deserializer)?;
         match value {
             Value::Bool(false) => Ok(ConstrainedSampling::Disabled),
-            Value::Bool(true) => Err(D::Error::custom("constrainedSampling must be false or a config")),
+            Value::Bool(true) => Err(D::Error::custom(
+                "constrainedSampling must be false or a config",
+            )),
             other => serde_json::from_value(other)
                 .map(ConstrainedSampling::Config)
                 .map_err(D::Error::custom),
@@ -1229,7 +1281,13 @@ pub struct Tool {
 
 impl Tool {
     pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
-        Self { name: name.into(), description: description.into(), parameters, constrained_sampling: None, typebox: false }
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            constrained_sampling: None,
+            typebox: false,
+        }
     }
 
     /// Mark the parameters as built with TypeBox (see [`Tool::typebox`]).
@@ -1384,7 +1442,10 @@ impl AssistantMessageEvent {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. })
+        matches!(
+            self,
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+        )
     }
 }
 
@@ -1664,11 +1725,15 @@ impl AnyModel {
 
     pub fn from_value(value: Value) -> Result<Self, String> {
         match AnyModel::raw_type(&value) {
-            Some("chat") => serde_json::from_value(value).map(AnyModel::Chat).map_err(|e| e.to_string()),
-            Some("image") => serde_json::from_value(value).map(AnyModel::Image).map_err(|e| e.to_string()),
-            Some("classifier") => {
-                serde_json::from_value(value).map(AnyModel::Classifier).map_err(|e| e.to_string())
-            }
+            Some("chat") => serde_json::from_value(value)
+                .map(AnyModel::Chat)
+                .map_err(|e| e.to_string()),
+            Some("image") => serde_json::from_value(value)
+                .map(AnyModel::Image)
+                .map_err(|e| e.to_string()),
+            Some("classifier") => serde_json::from_value(value)
+                .map(AnyModel::Classifier)
+                .map_err(|e| e.to_string()),
             Some(other) => Err(format!("Unknown model type: {other}")),
             None => Err("Invalid model type".to_string()),
         }
