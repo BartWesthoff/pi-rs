@@ -11,8 +11,11 @@
 mod support;
 use support::*;
 
-use pi_durable::{codemode::{GlobalEntry, JournalEntry, JournalState}, JsonObject, JsonString, JsonValue};
 use pi_chord::json::Map;
+use pi_durable::{
+    JsonObject, JsonString, JsonValue,
+    codemode::{GlobalEntry, JournalEntry, JournalState},
+};
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -20,7 +23,10 @@ static ALLOCATOR: Counting = Counting;
 /// A small realistic `JsonObject` for `GlobalEntry.outcome`.
 fn outcome() -> JsonObject {
     let mut m = Map::new();
-    m.insert(JsonString::from("status"), JsonValue::String(JsonString::from("ok")));
+    m.insert(
+        JsonString::from("status"),
+        JsonValue::String(JsonString::from("ok")),
+    );
     JsonObject::new(m)
 }
 
