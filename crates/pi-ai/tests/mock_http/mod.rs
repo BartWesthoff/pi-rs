@@ -45,6 +45,9 @@ pub struct Response {
     pub delay_ms: u64,
     /// Delay between body chunks.
     pub chunk_delay_ms: u64,
+    /// Close the connection after the body chunks without the terminating zero-length chunk:
+    /// the server drops the connection mid-body.
+    pub truncate: bool,
 }
 
 impl Response {
@@ -55,6 +58,7 @@ impl Response {
             chunks: vec![body.into()],
             delay_ms: 0,
             chunk_delay_ms: 0,
+            truncate: false,
         }
     }
     pub fn json(status: u16, body: serde_json::Value) -> Self {
@@ -67,7 +71,14 @@ impl Response {
         Self::new(200, "text/event-stream", body.to_string())
     }
     pub fn chunked(status: u16, content_type: &str, chunks: Vec<Vec<u8>>) -> Self {
-        Self { status, headers: vec![("content-type".into(), content_type.into())], chunks, delay_ms: 0, chunk_delay_ms: 0 }
+        Self {
+            status,
+            headers: vec![("content-type".into(), content_type.into())],
+            chunks,
+            delay_ms: 0,
+            chunk_delay_ms: 0,
+            truncate: false,
+        }
     }
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.into(), value.into()));
@@ -79,6 +90,11 @@ impl Response {
     }
     pub fn with_chunk_delay(mut self, ms: u64) -> Self {
         self.chunk_delay_ms = ms;
+        self
+    }
+    /// Drop the connection after the last chunk instead of ending the chunked body.
+    pub fn truncated(mut self) -> Self {
+        self.truncate = true;
         self
     }
 }
@@ -185,7 +201,7 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
     for (name, value) in &response.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
-    if response.chunks.len() == 1 {
+    if response.chunks.len() == 1 && !response.truncate {
         head.push_str(&format!("content-length: {}\r\n\r\n", response.chunks[0].len()));
         socket.write_all(head.as_bytes()).await?;
         socket.write_all(&response.chunks[0]).await?;
@@ -200,6 +216,10 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
             socket.write_all(chunk).await?;
             socket.write_all(b"\r\n").await?;
             socket.flush().await?;
+        }
+        if response.truncate {
+            // Dropping the socket closes the connection with the chunked body unfinished.
+            return Ok(());
         }
         socket.write_all(b"0\r\n\r\n").await?;
     }

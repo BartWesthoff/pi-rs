@@ -206,6 +206,10 @@ pub fn apply_openai_custom_headers_env(headers: &mut HeaderList) -> anyhow::Resu
 }
 
 /// Send a JSON POST request; non-2xx responses become [`ProviderHttpError`]s in the SDK's style.
+///
+/// `timeout_ms` bounds the wait for the response head, like the SDKs' `fetchWithTimeout`, which
+/// clears its timer once `fetch` resolves. Reading the body (a stream that may run far longer)
+/// is bounded only by the shared client's idle timeout ([`set_http_idle_timeout`]).
 pub async fn post_json(
     client: &reqwest::Client,
     url: &str,
@@ -216,14 +220,19 @@ pub async fn post_json(
     style: super::error_body::SdkErrorStyle,
 ) -> anyhow::Result<reqwest::Response> {
     use super::error_body::ProviderHttpError;
-    let mut request = client
+    let request = client
         .post(url)
         .headers(headers.to_header_map()?)
         .body(serde_json::to_vec(body)?);
-    if let Some(timeout) = timeout_ms {
-        request = request.timeout(Duration::from_millis(timeout));
-    }
-    let send = request.send();
+    let send = async move {
+        let sent = match timeout_ms {
+            Some(timeout) => super::wasm::timeout(Duration::from_millis(timeout), request.send())
+                .await
+                .map_err(|_| ProviderHttpError::timed_out())?,
+            None => request.send().await,
+        };
+        sent.map_err(|e| ProviderHttpError::from_reqwest(&e))
+    };
     let result = match signal {
         Some(signal) => {
             if signal.is_cancelled() {
@@ -236,7 +245,7 @@ pub async fn post_json(
         }
         None => send.await,
     };
-    let response = result.map_err(|e| anyhow::Error::new(ProviderHttpError::from_reqwest(&e)))?;
+    let response = result?;
     let status = response.status();
     if status.is_success() {
         return Ok(response);

@@ -5,6 +5,8 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use super::http::{FetchTerminated, NetworkError};
+
 /// One decoded server-sent event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSentEvent {
@@ -191,7 +193,7 @@ where
             };
             match chunk {
                 Some(Ok(bytes)) => self.queue.extend(self.decoder.push_bytes(&bytes)),
-                Some(Err(error)) => return Err(error.into()),
+                Some(Err(error)) => return Err(body_read_error(&error).into()),
                 None => {
                     self.done = true;
                     self.queue.extend(self.decoder.finish());
@@ -199,6 +201,21 @@ where
             }
         }
     }
+}
+
+/// A failed body read as undici reports it: `fetch` resolved, then the stream rejected with
+/// `TypeError: terminated` (a dropped connection, or no data within the idle timeout, whose
+/// undici cause is a `BodyTimeoutError`). Retry classification matches that message.
+fn body_read_error(error: &reqwest::Error) -> FetchTerminated {
+    let cause = if error.is_timeout() {
+        NetworkError {
+            code: Some("UND_ERR_BODY_TIMEOUT"),
+            message: "Body Timeout Error".into(),
+        }
+    } else {
+        NetworkError::from_reqwest(error)
+    };
+    FetchTerminated { cause }
 }
 
 /// Read SSE events from a reqwest response.

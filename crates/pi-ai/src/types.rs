@@ -433,6 +433,53 @@ pub struct ToolCall {
     pub arguments_error: Option<String>,
 }
 
+/// `serialize_with` helpers for fields holding a bare [`ToolCall`] or [`ToolResultMessage`]s
+/// where TypeScript passes the tagged object itself: the content block keeps
+/// `type: "toolCall"` and each tool result message keeps `role: "toolResult"`, as first key.
+pub mod tagged {
+    use serde::{Serialize, Serializer};
+
+    use super::{ToolCall, ToolResultMessage};
+
+    #[derive(Serialize)]
+    #[serde(tag = "type")]
+    enum ToolCallBlock<'a> {
+        #[serde(rename = "toolCall")]
+        ToolCall(&'a ToolCall),
+    }
+
+    #[derive(Serialize)]
+    #[serde(tag = "role")]
+    enum ToolResultEntry<'a> {
+        #[serde(rename = "toolResult")]
+        ToolResult(&'a ToolResultMessage),
+    }
+
+    /// A tool call as its assistant content block (`toolcall_end.toolCall`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error.
+    pub fn tool_call<S: Serializer>(
+        tool_call: &ToolCall,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        ToolCallBlock::ToolCall(tool_call).serialize(serializer)
+    }
+
+    /// Tool result messages with their `role` (`turn_end.toolResults`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error.
+    pub fn tool_result_messages<S: Serializer>(
+        messages: &[ToolResultMessage],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(messages.iter().map(ToolResultEntry::ToolResult))
+    }
+}
+
 /// Content of an assistant message: text, thinking or tool calls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -1389,7 +1436,7 @@ pub enum AssistantMessageEvent {
     ToolCallEnd {
         #[serde(rename = "contentIndex")]
         content_index: usize,
-        #[serde(rename = "toolCall")]
+        #[serde(rename = "toolCall", serialize_with = "tagged::tool_call")]
         tool_call: ToolCall,
         partial: AssistantMessage,
     },

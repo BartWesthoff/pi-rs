@@ -108,12 +108,17 @@ impl ProviderHttpError {
         }
     }
 
+    /// The SDKs' `APIConnectionTimeoutError`: no response arrived within the request timeout.
+    pub fn timed_out() -> Self {
+        let mut e = Self::connection("Request timed out.");
+        e.name = "APIConnectionTimeoutError".to_string();
+        e
+    }
+
     /// Map a reqwest transport error to the SDK's connection error messages.
     pub fn from_reqwest(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
-            let mut e = Self::connection("Request timed out.");
-            e.name = "APIConnectionTimeoutError".to_string();
-            e
+            Self::timed_out()
         } else {
             // Like the SDKs' APIConnectionError: the cause is not part of the message.
             Self::connection("Connection error.")

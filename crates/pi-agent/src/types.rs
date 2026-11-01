@@ -1088,6 +1088,7 @@ pub enum AgentEvent {
     TurnStart,
     TurnEnd {
         message: AgentMessage,
+        #[serde(serialize_with = "pi_ai::types::tagged::tool_result_messages")]
         tool_results: Vec<ToolResultMessage>,
     },
     /// Emitted for system, user, assistant, tool-result and custom messages.
