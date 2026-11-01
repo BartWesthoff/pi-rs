@@ -31944,6 +31944,103 @@ JSValue JS_LoadModule(JSContext *ctx, const char *basename,
     return promise;
 }
 
+static void js_promise_set_handled(JSContext *ctx, JSValueConst promise);
+
+/* pi-jsrt patch: whether the graph of `m` can be evaluated synchronously by
+   JS_RequireModule(). `visited` collects the modules already checked. */
+static int js_require_module_check(JSContext *ctx, JSModuleDef *m,
+                                   JSModuleDef ***pvisited, int *pcount,
+                                   int *psize)
+{
+    int i, ret;
+
+    for (i = 0; i < *pcount; i++) {
+        if ((*pvisited)[i] == m)
+            return JS_REQUIRE_MODULE_OK;
+    }
+    if (js_resize_array(ctx, (void **)pvisited, sizeof(**pvisited), psize,
+                        *pcount + 1))
+        return -1;
+    (*pvisited)[(*pcount)++] = m;
+    switch (m->status) {
+    case JS_MODULE_STATUS_EVALUATED:
+        return JS_REQUIRE_MODULE_OK;
+    case JS_MODULE_STATUS_EVALUATING_ASYNC:
+        return JS_REQUIRE_MODULE_ASYNC;
+    case JS_MODULE_STATUS_LINKING:
+    case JS_MODULE_STATUS_EVALUATING:
+        return JS_REQUIRE_MODULE_CYCLE;
+    default:
+        break;
+    }
+    if (m->has_tla)
+        return JS_REQUIRE_MODULE_ASYNC;
+    for (i = 0; i < m->req_module_entries_count; i++) {
+        ret = js_require_module_check(ctx, m->req_module_entries[i].module,
+                                      pvisited, pcount, psize);
+        if (ret != JS_REQUIRE_MODULE_OK)
+            return ret;
+    }
+    return JS_REQUIRE_MODULE_OK;
+}
+
+/* pi-jsrt patch: `require()` of an ES module, as Node does it: load, link
+   and evaluate the module synchronously and return its namespace. Unlike
+   JS_LoadModule() the result needs no promise job, so the host does not run
+   the job queue (which would re-enter a module graph being evaluated). */
+JSValue JS_RequireModule(JSContext *ctx, const char *basename,
+                         const char *filename, int *pstatus)
+{
+    JSModuleDef *m, **visited = NULL;
+    int count = 0, size = 0, status;
+    JSValue promise, ns;
+
+    *pstatus = JS_REQUIRE_MODULE_ERROR;
+    m = js_host_resolve_imported_module(ctx, basename, filename, JS_UNDEFINED);
+    if (!m)
+        return JS_EXCEPTION;
+    if (js_resolve_module(ctx, m) < 0) {
+        js_free_modules(ctx, JS_FREE_MODULE_NOT_RESOLVED);
+        return JS_EXCEPTION;
+    }
+    status = js_require_module_check(ctx, m, &visited, &count, &size);
+    js_free(ctx, visited);
+    if (status < 0)
+        return JS_EXCEPTION;
+    if (status != JS_REQUIRE_MODULE_OK) {
+        *pstatus = status;
+        return JS_UNDEFINED;
+    }
+    if (m->status == JS_MODULE_STATUS_EVALUATED) {
+        if (m->eval_has_exception)
+            return JS_Throw(ctx, js_dup(m->eval_exception));
+    } else {
+        /* no module of the graph has top-level await: evaluation settles
+           the promise before JS_EvalFunction() returns */
+        promise = JS_EvalFunction(ctx, JS_NewModuleValue(ctx, m));
+        if (JS_IsException(promise))
+            return JS_EXCEPTION;
+        status = JS_PromiseState(ctx, promise);
+        if (status == JS_PROMISE_REJECTED) {
+            /* the error is thrown to the caller, it is not an unhandled
+               rejection */
+            js_promise_set_handled(ctx, promise);
+            ns = JS_PromiseResult(ctx, promise);
+            JS_FreeValue(ctx, promise);
+            return JS_Throw(ctx, ns);
+        }
+        JS_FreeValue(ctx, promise);
+        if (status != JS_PROMISE_FULFILLED) {
+            *pstatus = JS_REQUIRE_MODULE_ASYNC;
+            return JS_UNDEFINED;
+        }
+    }
+    ns = JS_GetModuleNamespace(ctx, m);
+    if (!JS_IsException(ns))
+        *pstatus = JS_REQUIRE_MODULE_OK;
+    return ns;
+}
+
 static JSValue js_dynamic_import_job(JSContext *ctx,
                                      int argc, JSValueConst *argv)
 {
@@ -32247,6 +32344,9 @@ static JSValue js_async_module_execution_fulfilled(JSContext *ctx, JSValueConst 
                 JS_FreeValue(ctx, m_obj);
                 JS_FreeValue(ctx, error);
             } else {
+                /* pi-jsrt patch: the module is done (spec: [[AsyncEvaluationOrder]]
+                   is set to done), so later importers must not wait for it */
+                m->async_evaluation = false;
                 js_set_module_evaluated(ctx, m);
             }
         }

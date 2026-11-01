@@ -606,3 +606,28 @@ async fn deep_recursion_throws_a_catchable_range_error_and_unwinds() {
         assert_eq!(value, json!([[entry.clone(), entry.clone(), entry], 2000]), "{wrapper}");
     }
 }
+
+/// A synchronous module whose dependency has top-level await finished evaluating with its
+/// async-evaluation flag still set, so a later `import()` of a module that depends on it waited
+/// for it forever (ECMA-262 marks such modules as done: `[[AsyncEvaluationOrder]]` is `done`).
+#[tokio::test]
+async fn import_after_async_graph_settles_does_not_wait_on_evaluated_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "tla.mjs", "await Promise.resolve();\nexport const v = 1;\n");
+    write(root, "mid.mjs", "import { v } from './tla.mjs';\nexport const w = v + 1;\n");
+    write(root, "entry.mjs", "import { w } from './mid.mjs';\nexport default w;\n");
+    write(root, "late.mjs", "import { w } from './mid.mjs';\nexport const z = w + 1;\n");
+    let rt = JsRuntime::new(RuntimeOptions {
+        cwd: Some(root.to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+    let entry = rt.import("./entry.mjs").await.unwrap();
+    assert_eq!(entry.get("default").await.unwrap(), json!(2));
+    let late = tokio::time::timeout(std::time::Duration::from_secs(10), rt.import("./late.mjs"))
+        .await
+        .expect("import() of a module depending on an evaluated module must settle")
+        .unwrap();
+    assert_eq!(late.get("z").await.unwrap(), json!(3));
+}

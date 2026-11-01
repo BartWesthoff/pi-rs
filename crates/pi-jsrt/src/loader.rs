@@ -24,9 +24,10 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::js::ext;
 use crate::js::rquickjs::qjs;
 use crate::js::{
-    Context, Engine, JsArgs, JsArray, JsError, JsNativeError, JsObject, JsPromise, JsResult, JsString, JsValue, PromiseState, Source, js_string,
+    Context, Engine, JsArgs, JsArray, JsError, JsNativeError, JsObject, JsPromise, JsResult, JsString, JsValue, Source, js_string,
 };
 use serde_json::Value;
 
@@ -82,6 +83,17 @@ pub(crate) enum Kind {
     Require,
 }
 
+impl Kind {
+    /// The package.json `exports` / `imports` conditions Node matches for this kind of load.
+    /// Bundler-only conditions such as `module` are not among them.
+    fn conditions(self) -> &'static [&'static str] {
+        match self {
+            Kind::Import => &["import", "node", "default"],
+            Kind::Require => &["require", "node", "default"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
     Esm,
@@ -133,9 +145,29 @@ impl Loader {
 
     /// The module name for `resolved`, registered for the QuickJS loader callback.
     fn module_name(&self, resolved: &Resolved) -> String {
-        let name = self.key(resolved);
+        self.module_name_at(resolved, self.generation.get())
+    }
+
+    /// The module name for `resolved` in cache `generation`.
+    fn module_name_at(&self, resolved: &Resolved, generation: u32) -> String {
+        let name = resolved.key_at(generation);
         self.names.borrow_mut().entry(name.clone()).or_insert_with(|| resolved.clone());
         name
+    }
+
+    /// The cache generation of the module named `name`. Imports from a module resolve in its
+    /// generation, so a module loaded before a cache clear keeps sharing the instances it
+    /// imported (like jiti's per-load module cache); other names use the current generation.
+    fn generation_of(&self, name: &str) -> u32 {
+        if let Some(i) = name.rfind(RELOAD_MARK)
+            && let Ok(generation) = name[i + RELOAD_MARK.len()..].parse()
+        {
+            return generation;
+        }
+        match self.names.borrow().get(name) {
+            Some(Resolved::File(_)) => 0,
+            _ => self.generation.get(),
+        }
     }
 
     /// jiti-style `__filename`/`__dirname`/`require` for ES modules, unless disabled
@@ -221,17 +253,17 @@ impl Loader {
                 .ok()
                 .and_then(|u| u.to_file_path().ok())
                 .unwrap_or_else(|| PathBuf::from(rest));
-            return self.resolve_path(&path, kind).map(Resolved::File).ok_or_else(not_found);
+            return self.resolve_path(&path).map(Resolved::File).ok_or_else(not_found);
         }
         if spec.starts_with('/') {
             return self
-                .resolve_path(&normalize(Path::new(&spec)), kind)
+                .resolve_path(&normalize(Path::new(&spec)))
                 .map(Resolved::File)
                 .ok_or_else(not_found);
         }
         if spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../") {
             let p = normalize(&base_dir.join(&spec));
-            return self.resolve_path(&p, kind).map(Resolved::File).ok_or_else(not_found);
+            return self.resolve_path(&p).map(Resolved::File).ok_or_else(not_found);
         }
         if spec.starts_with('#') {
             return self.resolve_imports(&spec, base_dir, kind).map(Resolved::File).ok_or_else(not_found);
@@ -245,11 +277,7 @@ impl Loader {
         while let Some(d) = dir {
             if let Some(pkg) = self.package_json(d) {
                 let imports = pkg.get("imports")?;
-                let conditions: &[&str] = match kind {
-                    Kind::Import => &["import", "module", "node", "default"],
-                    Kind::Require => &["require", "node", "default"],
-                };
-                let target = resolve_exports(imports, spec, conditions)?;
+                let target = resolve_exports(imports, spec, kind.conditions())?;
                 if target.starts_with("./") || target.starts_with("../") {
                     return self.resolve_file_or_index(&normalize(&d.join(target)));
                 }
@@ -261,7 +289,7 @@ impl Loader {
         None
     }
 
-    fn resolve_path(&self, p: &Path, kind: Kind) -> Option<PathBuf> {
+    fn resolve_path(&self, p: &Path) -> Option<PathBuf> {
         if p.is_file() {
             return Some(p.to_path_buf());
         }
@@ -290,11 +318,8 @@ impl Loader {
         }
         if p.is_dir() {
             if let Some(pkg) = self.package_json(p) {
-                let main = match kind {
-                    Kind::Import => pkg.get("module").or_else(|| pkg.get("main")),
-                    Kind::Require => pkg.get("main"),
-                }
-                .and_then(|v| v.as_str());
+                // Node (and jiti) use `main` for `import` too; `module` is a bundler field.
+                let main = pkg.get("main").and_then(|v| v.as_str());
                 if let Some(main) = main
                     && let Some(r) = self.resolve_file_or_index(&normalize(&p.join(main)))
                 {
@@ -381,12 +406,8 @@ impl Loader {
     fn resolve_in_package(&self, pkg_dir: &Path, subpath: &str, kind: Kind) -> Option<PathBuf> {
         let pkg = self.package_json(pkg_dir);
         if let Some(exports) = pkg.as_ref().and_then(|p| p.get("exports")) {
-            let conditions: &[&str] = match kind {
-                Kind::Import => &["import", "module", "node", "default"],
-                Kind::Require => &["require", "node", "default"],
-            };
             let sub = if subpath.is_empty() { ".".to_string() } else { format!("./{subpath}") };
-            if let Some(target) = resolve_exports(exports, &sub, conditions) {
+            if let Some(target) = resolve_exports(exports, &sub, kind.conditions()) {
                 let p = normalize(&pkg_dir.join(target));
                 if p.is_file() {
                     return Some(p);
@@ -398,9 +419,9 @@ impl Loader {
             // Lenient fallback (Node would throw ERR_PACKAGE_PATH_NOT_EXPORTED).
         }
         if subpath.is_empty() {
-            self.resolve_path(pkg_dir, kind)
+            self.resolve_path(pkg_dir)
         } else {
-            self.resolve_path(&normalize(&pkg_dir.join(subpath)), kind)
+            self.resolve_path(&normalize(&pkg_dir.join(subpath)))
         }
     }
 
@@ -519,7 +540,7 @@ impl Loader {
                     }
                     VirtualModule::EsmJs(src) => compile_module(ctx, &src, name)?,
                     _ => {
-                        let value = self.require_resolved(ctx, &resolved).map_err(|e| error::from_js(e, ctx))?;
+                        let value = self.require_resolved(ctx, &resolved, None).map_err(|e| error::from_js(e, ctx))?;
                         self.synthetic_from_value(ctx, value, name, true).map_err(|e| error::from_js(e, ctx))?
                     }
                 }
@@ -584,8 +605,8 @@ impl Loader {
         Ok(m)
     }
 
-    /// `require()` a resolved target.
-    fn require_resolved(self: &Rc<Self>, ctx: &mut Context, resolved: &Resolved) -> JsResult<JsValue> {
+    /// `require()` a resolved target from `parent` (a filename, for error messages).
+    fn require_resolved(self: &Rc<Self>, ctx: &mut Context, resolved: &Resolved, parent: Option<&Path>) -> JsResult<JsValue> {
         let key = self.key(resolved);
         if let Some(m) = self.cjs.borrow().get(&key).cloned() {
             return m.get(js_string!("exports"), ctx);
@@ -601,7 +622,7 @@ impl Loader {
                     return Err(JsNativeError::error().with_message(format!("Cannot find module '{spec}'")).into());
                 };
                 match vm {
-                    VirtualModule::Esm(_) | VirtualModule::EsmJs(_) => self.require_esm(ctx, resolved),
+                    VirtualModule::Esm(_) | VirtualModule::EsmJs(_) => self.require_esm(ctx, resolved, parent),
                     VirtualModule::CommonJs(src) => {
                         let path = PathBuf::from(format!("virtual:{spec}"));
                         self.run_cjs(ctx, &key, &path, &src)
@@ -636,31 +657,56 @@ impl Loader {
                         Ok(v)
                     }
                     Format::Cjs => self.run_cjs(ctx, &key, path, &prepared.code),
-                    Format::Esm => self.require_esm(ctx, resolved),
+                    Format::Esm => self.require_esm(ctx, resolved, parent),
                 }
             }
         }
     }
 
-    /// Synchronously evaluate an ES module for `require()` and return its namespace.
-    fn require_esm(self: &Rc<Self>, ctx: &mut Context, resolved: &Resolved) -> JsResult<JsValue> {
+    /// Evaluate an ES module for `require()` and return its namespace, as Node's `require(esm)`
+    /// does: synchronously and without running queued promise jobs (running them here would
+    /// re-enter a module graph that is still being evaluated).
+    fn require_esm(self: &Rc<Self>, ctx: &mut Context, resolved: &Resolved, parent: Option<&Path>) -> JsResult<JsValue> {
         let name = self.module_name(resolved);
-        let promise = load_by_name(ctx, &name)?;
-        while let Some(r) = ctx.run_pending_job() {
-            if let Err(e) = r {
-                engine::report_uncaught(ctx, e);
+        let c = CString::new(name.as_str()).map_err(|_| engine::type_error("invalid module name"))?;
+        let raw = ctx.as_raw();
+        let mut status = ext::JS_REQUIRE_MODULE_ERROR;
+        // SAFETY: `raw` is this thread's live context and both names are NUL-terminated
+        // strings that outlive the call; `status` is a valid out-pointer.
+        let v = unsafe { ext::JS_RequireModule(raw, c"".as_ptr(), c.as_ptr(), &mut status) };
+        let parent = parent.map(|p| p.display().to_string());
+        let path = module_path(&name);
+        let (code, message) = match status {
+            ext::JS_REQUIRE_MODULE_ASYNC => {
+                let mut message = "require() cannot be used on an ESM graph with top-level await. Use import() instead. \
+                     To see where the top-level await comes from, use --experimental-print-required-tla."
+                    .to_string();
+                if let Some(parent) = &parent {
+                    message.push_str(&format!("\n  From {parent} "));
+                }
+                message.push_str(&format!("\n  Requiring {path} "));
+                ("ERR_REQUIRE_ASYNC_MODULE", message)
             }
-        }
-        match promise.state() {
-            PromiseState::Fulfilled(ns) => Ok(ns),
-            PromiseState::Rejected(e) => Err(JsError::from_opaque(e)),
-            PromiseState::Pending => Err(JsNativeError::error()
-                .with_message(format!(
-                    "require() of ES module {} which uses top-level await is not supported; use import()",
-                    module_path(&name)
-                ))
-                .into()),
-        }
+            ext::JS_REQUIRE_MODULE_CYCLE => {
+                let mut message = format!("Cannot require() ES Module {path} in a cycle.");
+                if let Some(parent) = &parent {
+                    message.push_str(&format!(" (from {parent})"));
+                }
+                message.push_str(
+                    " A cycle involving require(esm) is not allowed to maintain invariants mandated by the ECMAScript \
+                     specification. Try making at least part of the dependency in the graph lazily loaded.",
+                );
+                ("ERR_REQUIRE_CYCLE_MODULE", message)
+            }
+            _ => return crate::js::check_value(&Context::from_raw(raw), v),
+        };
+        let err = Error::Js(error::JsException {
+            name: "Error".to_string(),
+            message,
+            stack: None,
+            code: Some(code.to_string()),
+        });
+        Err(error::to_js(&err, ctx))
     }
 
     fn run_cjs(self: &Rc<Self>, ctx: &mut Context, key: &str, path: &Path, code: &str) -> JsResult<JsValue> {
@@ -905,7 +951,7 @@ unsafe extern "C" fn normalize_hook(raw: *mut qjs::JSContext, base: *const c_cha
         }
         let dir = base_dir_of(&ctx, &base);
         let resolved = l.resolve(&mut ctx, &spec, &dir, Kind::Import).map_err(|e| error::to_js(&e, &mut ctx))?;
-        Ok::<_, JsError>(l.module_name(&resolved))
+        Ok::<_, JsError>(l.module_name_at(&resolved, l.generation_of(&base)))
     }));
     match r {
         Ok(Ok(resolved)) => {
@@ -1089,7 +1135,7 @@ pub(crate) fn require(ctx: &mut Context, specifier: &str, parent: Option<&Path>)
     let l = loader(ctx);
     let base = referrer_dir(ctx, parent);
     let resolved = l.resolve(ctx, specifier, &base, Kind::Require).map_err(|e| error::to_js(&e, ctx))?;
-    l.require_resolved(ctx, &resolved)
+    l.require_resolved(ctx, &resolved, parent)
 }
 
 pub(crate) fn clear_file_cache(ctx: &mut Context) {
@@ -1148,7 +1194,7 @@ fn op_transpile(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
 fn op_is_common_js(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let path = arg_string(args, 0, ctx)?;
     let l = loader(ctx);
-    let Some(resolved) = l.resolve_path(Path::new(&path), Kind::Require) else { return Ok(JsValue::from(false)) };
+    let Some(resolved) = l.resolve_path(Path::new(&path)) else { return Ok(JsValue::from(false)) };
     let cjs = l.prepare_file(ctx, &resolved).is_ok_and(|p| p.format == Format::Cjs);
     Ok(JsValue::from(cjs))
 }

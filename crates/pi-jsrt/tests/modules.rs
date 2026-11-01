@@ -322,3 +322,79 @@ async fn real_npm_packages() {
         })
     );
 }
+
+/// `import` resolves a package like Node (and jiti): `main` without `exports`, and only Node's
+/// conditions inside `exports` / `imports`. The bundler-only `module` field and condition used to
+/// win, which loaded ESM builds that call `require()` (turndown's `lib/turndown.es.js`).
+#[tokio::test]
+async fn import_resolves_package_entries_like_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "node_modules/dual/package.json",
+        r#"{ "name": "dual", "main": "lib/main.cjs.js", "module": "lib/mod.es.js" }"#,
+    );
+    write(root, "node_modules/dual/lib/main.cjs.js", "exports.which = 'main';\n");
+    write(
+        root,
+        "node_modules/dual/lib/mod.es.js",
+        "export const which = 'module'; export const dep = require('./dep.cjs');\n",
+    );
+    write(root, "node_modules/dual/lib/dep.cjs", "module.exports = 1;\n");
+    write(
+        root,
+        "node_modules/cond/package.json",
+        r##"{ "name": "cond", "exports": { ".": { "module": "./mod.mjs", "default": "./main.cjs" } }, "imports": { "#target": { "module": "./mod.mjs", "default": "./main.cjs" } } }"##,
+    );
+    write(root, "node_modules/cond/main.cjs", "exports.which = 'default';\n");
+    write(root, "node_modules/cond/mod.mjs", "export const which = 'module-condition';\n");
+    write(root, "node_modules/cond/self.mjs", "export { which } from '#target';\n");
+    write(
+        root,
+        "entry.mjs",
+        r#"
+import { which as dual } from "dual";
+import { which as cond } from "cond";
+import { which as condImports } from "./node_modules/cond/self.mjs";
+export default { dual, cond, condImports };
+"#,
+    );
+    let rt = JsRuntime::new(options(root)).unwrap();
+    let ns = rt.import("./entry.mjs").await.unwrap();
+    assert_eq!(
+        ns.get("default").await.unwrap(),
+        json!({ "dual": "main", "cond": "default", "condImports": "default" })
+    );
+}
+
+/// After a module cache clear (each extension load, jiti `moduleCache: false`), a module that was
+/// loaded before the clear still shares its own graph: its later `import()` must reuse the
+/// instances it imported, not re-evaluate them (an extension's lazily imported UI module read an
+/// empty copy of the extension's state module).
+#[tokio::test]
+async fn lazy_import_after_cache_clear_reuses_the_importers_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "shared.mjs", "export const state = { n: 0 };\n");
+    write(root, "reader.mjs", "import { state } from './shared.mjs';\nexport const read = () => state.n;\n");
+    write(
+        root,
+        "ext.mjs",
+        r#"import { state } from "./shared.mjs";
+export function bump() { state.n += 1; return state.n; }
+export async function lazyRead() { const m = await import("./reader.mjs"); return m.read(); }
+"#,
+    );
+    let rt = JsRuntime::new(options(root)).unwrap();
+    let first = rt.import("./ext.mjs").await.unwrap();
+    first.call_method("bump", vec![]).await.unwrap();
+    assert_eq!(first.call_method("bump", vec![]).await.unwrap(), json!(2));
+    // A later load (another extension) clears the cache: it gets fresh module instances...
+    rt.clear_module_cache().await.unwrap();
+    let second = rt.import("./ext.mjs").await.unwrap();
+    assert_eq!(second.call_method("bump", vec![]).await.unwrap(), json!(1));
+    // ...while each earlier module keeps resolving into its own instances.
+    assert_eq!(first.call_method("lazyRead", vec![]).await.unwrap(), json!(2));
+    assert_eq!(second.call_method("lazyRead", vec![]).await.unwrap(), json!(1));
+}

@@ -33,7 +33,7 @@ pub type JsResult<T> = Result<T, JsError>;
 
 /// Additions of the vendored QuickJS (`vendor/rquickjs-sys/PATCH.md` in the pi-rs repository).
 pub mod ext {
-    use std::ffi::c_void;
+    use std::ffi::{c_char, c_int, c_void};
 
     use rquickjs::qjs::{JSContext, JSRuntime, JSValue};
 
@@ -47,6 +47,15 @@ pub mod ext {
     pub type TimezoneOffset = unsafe extern "C" fn(time_ms: i64, opaque: *mut c_void) -> i32;
     /// The current time of `Date`, in ms since the epoch.
     pub type DateNow = unsafe extern "C" fn(opaque: *mut c_void) -> i64;
+
+    /// [`JS_RequireModule`] returned the module namespace.
+    pub const JS_REQUIRE_MODULE_OK: c_int = 0;
+    /// [`JS_RequireModule`] failed with a pending exception.
+    pub const JS_REQUIRE_MODULE_ERROR: c_int = 1;
+    /// The required module graph has top-level await (or is still evaluating asynchronously).
+    pub const JS_REQUIRE_MODULE_ASYNC: c_int = 2;
+    /// The required module graph contains a module that is being linked or evaluated.
+    pub const JS_REQUIRE_MODULE_CYCLE: c_int = 3;
 
     unsafe extern "C" {
         /// Install the promise job context hooks.
@@ -63,6 +72,14 @@ pub mod ext {
         pub fn JS_SetGlobalObject(ctx: *mut JSContext, obj: JSValue);
         /// Install the clock of `Date`.
         pub fn JS_SetDateNowFunc(rt: *mut JSRuntime, func: Option<DateNow>, opaque: *mut c_void);
+        /// `require()` of an ES module: load, link and evaluate `filename` synchronously without
+        /// running promise jobs. `*status` receives one of the `JS_REQUIRE_MODULE_*` values.
+        pub fn JS_RequireModule(
+            ctx: *mut JSContext,
+            basename: *const c_char,
+            filename: *const c_char,
+            status: *mut c_int,
+        ) -> JSValue;
     }
 }
 
