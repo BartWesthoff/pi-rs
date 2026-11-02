@@ -109,6 +109,20 @@ fn chatgpt_business_workspace_usage_limit_stays_non_retryable() {
     assert!(!is_retryable_assistant_error(&error_message(message)));
 }
 
+// Zhipu/Z.ai usage limit (code 1308) is sent as HTTP 429 but resets after hours (#11572).
+#[test]
+fn zhipu_usage_limit_code_1308_is_not_retried() {
+    for message in [
+        r#"429 {"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-01-01 12:00:00"}}"#,
+        r#"zai API error (429): {"code": 1308, "message": "usage limit"}"#,
+    ] {
+        assert!(!is_retryable_assistant_error(&error_message(message)), "{message}");
+    }
+    // Only the exact code: a longer number stays a plain retryable 429.
+    let message = r#"429 {"error":{"code":"13080","message":"rate limit"}}"#;
+    assert!(is_retryable_assistant_error(&error_message(message)), "{message}");
+}
+
 #[test]
 fn retry_delay_caps() {
     assert_eq!(retry_delay_ms(2000, None, 6), 60000);

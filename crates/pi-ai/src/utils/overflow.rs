@@ -14,6 +14,7 @@ const OVERFLOW_PATTERN_SOURCES: &[&str] = &[
     r"(?i)input is too long for requested model",
     r"(?i)exceeds the context window",
     r"(?i)exceeds (?:the )?(?:model'?s )?maximum context length(?: of [0-9,]+ tokens?|\s*\([0-9,]+\))",
+    r"(?i)context window exceeded",
     r"(?i)input token count[^\n\r\u{2028}\u{2029}]*exceeds the maximum",
     r"(?i)maximum prompt length is [0-9]+",
     r"(?i)reduce the length of the messages",

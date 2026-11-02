@@ -22,6 +22,9 @@ static NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN: Lazy<Regex> = Lazy::new(|| {
         "billing",
         "subscription_sharing_usage_limit_exceeded",
         "subscription_sharing_workplace_individual_usage_limit_exceeded",
+        // Zhipu/Z.ai error code 1308: the plan's usage limit, sent as HTTP 429; it resets after
+        // hours. Upstream ends with the look-ahead `(?![0-9])`, spelled out here as an alternation.
+        r#""code"\s*:\s*"?1308(?:[^0-9]|$)"#,
     ])
 });
 

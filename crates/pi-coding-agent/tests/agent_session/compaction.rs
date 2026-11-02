@@ -8,7 +8,7 @@ use pi_agent::types::{AgentMessage, AgentToolRef, AgentToolResult, FnAgentTool};
 use pi_ai::auth::types::{ApiKeyAuth, ApiKeyResolveInput, AuthResult, ModelAuth, ProviderAuth};
 use pi_ai::AnyModel;
 use pi_ai::models::{CreateProviderOptions, ProviderApi, ProviderStreams, create_provider};
-use pi_ai::providers::faux::{FauxModelDefinition, FauxResponseStep};
+use pi_ai::providers::faux::{FauxMessageOptions, FauxModelDefinition, FauxResponseStep, faux_assistant_message, faux_text};
 use pi_ai::types::{SimpleStreamOptions, StopReason, TranscriptContext};
 use pi_coding_agent::core::agent_session::{AgentSessionEvent, AgentSessionEventListener};
 use pi_coding_agent::core::compaction::{CompactionResult, estimate_tokens};
@@ -622,6 +622,57 @@ async fn compacts_and_resumes_after_a_length_stop_below_the_desired_output_limit
     assert_eq!(end["willRetry"], json!(true));
     assert_eq!(harness.session.get_last_assistant_text().as_deref(), Some("completed response"));
     harness.cleanup();
+}
+
+/// The `errorMessage` pi-ai builds from llama.cpp's real `exceed_context_size_error` 400 body
+/// (asserted end to end in `pi-ai/tests/openai_completions.rs`).
+const LLAMA_CPP_OVERFLOW_ERROR: &str = r#"400: {"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}"#;
+
+/// LiteLLM's pre-call check (#11494), as a local proxy in front of llama.cpp reports it.
+const LITELLM_OVERFLOW_ERROR: &str = "400: {\"message\":\"litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.\"}";
+
+#[tokio::test]
+async fn compacts_and_retries_after_a_local_server_context_overflow_error() {
+    for overflow_error in [LLAMA_CPP_OVERFLOW_ERROR, LITELLM_OVERFLOW_ERROR] {
+        let harness = create_harness(HarnessOptions {
+            models: vec![faux_model("faux-1", 8192, Some(100))],
+            settings: settings(json!({"compaction": {"keepRecentTokens": 1, "reserveTokens": 0}})),
+            extension_factories: vec![compactor("overflow compacted")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        harness.set_responses(vec![
+            text("first answer"),
+            faux_assistant_message(
+                vec![faux_text("")],
+                FauxMessageOptions {
+                    stop_reason: Some(StopReason::Error),
+                    error_message: Some(overflow_error.into()),
+                    ..Default::default()
+                },
+            )
+            .into(),
+            text("answer after compaction"),
+        ]);
+
+        harness.session.prompt(&"x".repeat(2000), None).await.unwrap();
+        harness.session.prompt(&"y".repeat(2000), None).await.unwrap();
+
+        assert_eq!(harness.faux.state().call_count, 3, "{overflow_error}");
+        let end = last_event(&harness, "compaction_end");
+        assert_eq!(end["reason"], json!("overflow"), "{overflow_error}");
+        assert_eq!(end["aborted"], json!(false), "{overflow_error}");
+        assert_eq!(end["willRetry"], json!(true), "{overflow_error}");
+        assert_eq!(compaction_entries(&harness).len(), 1, "{overflow_error}");
+        assert_eq!(harness.session.get_last_assistant_text().as_deref(), Some("answer after compaction"));
+        // The failed overflow response is not replayed to the model on the retry.
+        let replayed_error = harness.session.messages().iter().any(|message| {
+            matches!(message, AgentMessage::Assistant(a) if a.stop_reason == StopReason::Error)
+        });
+        assert!(!replayed_error, "{overflow_error}");
+        harness.cleanup();
+    }
 }
 
 // Regression coverage for #8133 (model overrides between assistant turns) and #9740 (an oversized
