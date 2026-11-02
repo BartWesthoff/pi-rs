@@ -3,6 +3,7 @@
 //! Markdown is lexed with [`crate::marked`] (GFM + CJK-friendly emphasis, strict
 //! `~~` strikethrough and LaTeX math) and rendered to styled terminal lines.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::StyleFn;
@@ -46,6 +47,8 @@ pub struct MarkdownTheme {
     pub italic: StyleFn,
     pub strikethrough: StyleFn,
     pub underline: StyleFn,
+    /// Highlighted lines of a code block. A [`Markdown`] component reuses the result for the same
+    /// code until [`Component::invalidate`], which a theme change must call.
     pub highlight_code: Option<HighlightCodeFn>,
     /// Prefix applied to each rendered code block line (default: two spaces).
     pub code_block_indent: Option<String>,
@@ -100,6 +103,73 @@ struct InlineStyleContext {
     style_prefix: String,
 }
 
+/// Lexed source: the (transformed, tab-expanded) text and its block tokens.
+struct Lexed {
+    source: String,
+    tokens: Vec<Token>,
+    /// The source defines reference links, so blocks with the same source can render differently.
+    has_link_defs: bool,
+}
+
+/// Highlighted lines of a block's code, keyed by language and source.
+type HighlightedCode = HashMap<String, Arc<Vec<String>>>;
+
+/// A rendered top-level block, reused by the next render for a token with the same source.
+struct RenderedBlock {
+    /// Width and type of the following block (which decides the spacing) the lines were rendered for.
+    width: usize,
+    next_kind: Option<T>,
+    /// Output lines: wrapped, with margins, and padded or backgrounded to the width.
+    lines: Vec<String>,
+    /// Survives a resize or new spacing, which render the block again.
+    highlighted_code: HighlightedCode,
+}
+
+/// The last render: its output, by top-level block, and what it was rendered for.
+struct Rendered {
+    text: String,
+    width: usize,
+    /// `None` when the text was blank.
+    lexed: Option<Arc<Lexed>>,
+    /// One block per token of `lexed`.
+    blocks: Vec<Arc<RenderedBlock>>,
+    /// Top and bottom padding lines.
+    padding_lines: Vec<String>,
+}
+
+impl Rendered {
+    fn lines(&self) -> Vec<String> {
+        if self.lexed.is_none() {
+            return Vec::new();
+        }
+        let count =
+            self.padding_lines.len() * 2 + self.blocks.iter().map(|b| b.lines.len()).sum::<usize>();
+        if count == 0 {
+            return vec![String::new()];
+        }
+        let mut lines = Vec::with_capacity(count);
+        lines.extend(self.padding_lines.iter().cloned());
+        for block in &self.blocks {
+            lines.extend(block.lines.iter().cloned());
+        }
+        lines.extend(self.padding_lines.iter().cloned());
+        lines
+    }
+
+    /// Blocks the next render may reuse, by token source.
+    fn reusable_blocks(&self) -> HashMap<&str, &Arc<RenderedBlock>> {
+        match &self.lexed {
+            Some(lexed) if !lexed.has_link_defs => lexed
+                .tokens
+                .iter()
+                .map(|t| t.raw.as_str())
+                .zip(&self.blocks)
+                .collect(),
+            _ => HashMap::new(),
+        }
+    }
+}
+
 struct State {
     text: String,
     padding_x: usize,
@@ -108,8 +178,11 @@ struct State {
     theme: MarkdownTheme,
     options: MarkdownOptions,
     default_style_prefix: Option<String>,
-    cache: Option<(String, usize, Vec<String>)>,
-    cached_tokens: Option<(String, Arc<Vec<Token>>)>,
+    /// The last render. While a message streams only its last block changes, so a render styles and
+    /// wraps only that block; [`Markdown::set_text`] keeps it for reuse, invalidation drops it.
+    rendered: Option<Arc<Rendered>>,
+    /// Tokens depend only on the source, so they survive theme and width invalidation.
+    cached_tokens: Option<Arc<Lexed>>,
     /// Bumped by every change that invalidates rendered output, so a render that ran without the
     /// lock only stores its results when nothing changed meanwhile.
     generation: u64,
@@ -125,7 +198,8 @@ struct RenderInput {
     theme: MarkdownTheme,
     options: MarkdownOptions,
     default_style_prefix: Option<String>,
-    cached_tokens: Option<(String, Arc<Vec<Token>>)>,
+    cached_tokens: Option<Arc<Lexed>>,
+    previous: Option<Arc<Rendered>>,
     generation: u64,
 }
 
@@ -230,6 +304,8 @@ struct Renderer<'a> {
     options: &'a MarkdownOptions,
     default_text_style: Option<&'a DefaultTextStyle>,
     default_style_prefix: &'a mut Option<String>,
+    /// Highlighted code of the block being rendered.
+    highlighted_code: HighlightedCode,
 }
 
 impl Renderer<'_> {
@@ -346,7 +422,16 @@ impl Renderer<'_> {
                 lines.push((self.theme.code_block_border)(&format!("```{lang}")));
                 if let Some(highlight) = &self.theme.highlight_code {
                     let lang_arg = token.lang.as_deref().filter(|_| !token.indented);
-                    for hl in highlight(&token.text, lang_arg) {
+                    let key = format!("{}\0{}", lang_arg.unwrap_or(""), token.text);
+                    let highlighted = match self.highlighted_code.get(&key) {
+                        Some(highlighted) => highlighted.clone(),
+                        None => {
+                            let highlighted = Arc::new(highlight(&token.text, lang_arg));
+                            self.highlighted_code.insert(key, highlighted.clone());
+                            highlighted
+                        }
+                    };
+                    for hl in highlighted.iter() {
                         lines.push(format!("{indent}{hl}"));
                     }
                 } else {
@@ -807,7 +892,7 @@ impl Markdown {
                 theme,
                 options: options.unwrap_or_default(),
                 default_style_prefix: None,
-                cache: None,
+                rendered: None,
                 cached_tokens: None,
                 generation: 0,
             }),
@@ -834,37 +919,42 @@ impl Markdown {
         self.lock().text.clone()
     }
 
+    /// Replace the text. The next render reuses the rendered blocks whose source is unchanged.
     pub fn set_text(&self, text: impl Into<String>) {
         let mut s = self.lock();
         s.text = text.into();
-        s.cache = None;
         s.generation += 1;
     }
 
     pub fn set_theme(&self, theme: MarkdownTheme) {
         let mut s = self.lock();
         s.theme = theme;
-        s.default_style_prefix = None;
-        s.cache = None;
-        s.generation += 1;
+        s.drop_rendered();
     }
 
     pub fn set_default_text_style(&self, style: Option<DefaultTextStyle>) {
         let mut s = self.lock();
         s.default_text_style = style;
-        s.default_style_prefix = None;
-        s.cache = None;
-        s.generation += 1;
+        s.drop_rendered();
+    }
+}
+
+impl State {
+    /// Forget the rendered blocks and the default style's prefix, which depend on the theme.
+    fn drop_rendered(&mut self) {
+        self.rendered = None;
+        self.default_style_prefix = None;
+        self.generation += 1;
     }
 }
 
 impl Markdown {
-    /// Render `input` at `width`. Runs without the state lock; returns the lines to cache (empty
-    /// for blank text, which renders nothing) plus the tokens and default style prefix to cache.
+    /// Render `input` at `width`. Runs without the state lock; returns the render plus the tokens and
+    /// default style prefix to cache.
     fn render_unlocked(
         input: RenderInput,
         width: usize,
-    ) -> (Vec<String>, Option<(String, Arc<Vec<Token>>)>, Option<String>, bool) {
+    ) -> (Rendered, Option<Arc<Lexed>>, Option<String>) {
         let RenderInput {
             text: source,
             padding_x,
@@ -874,77 +964,141 @@ impl Markdown {
             options,
             mut default_style_prefix,
             cached_tokens,
+            previous,
             ..
         } = input;
         let content_width = width.saturating_sub(padding_x * 2).max(1);
         let text = match &options.transform {
             Some(t) => t(&source, content_width),
-            None => source,
+            None => source.clone(),
         };
         if text.is_empty() || js_trim(&text).is_empty() {
-            return (Vec::new(), cached_tokens, default_style_prefix, true);
+            let rendered = Rendered {
+                text: source,
+                width,
+                lexed: None,
+                blocks: Vec::new(),
+                padding_lines: Vec::new(),
+            };
+            return (rendered, cached_tokens, default_style_prefix);
         }
 
         let normalized = text.replace('\t', "   ");
-        let (tokens, cached_tokens) = match cached_tokens {
-            Some((src, tokens)) if src == normalized => (tokens.clone(), Some((src, tokens))),
+        let lexed = match cached_tokens {
+            Some(lexed) if lexed.source == normalized => lexed,
             _ => {
-                let mut tokens = marked::lexer(&normalized, MarkedOptions::pi());
+                let (mut tokens, has_link_defs) =
+                    marked::lexer_with_link_defs(&normalized, MarkedOptions::pi());
                 trim_partial_closing_fences(&mut tokens);
-                let tokens = Arc::new(tokens);
-                (tokens.clone(), Some((normalized, tokens)))
+                Arc::new(Lexed {
+                    source: normalized,
+                    tokens,
+                    has_link_defs,
+                })
             }
         };
 
+        let bg_fn = default_text_style.as_ref().and_then(|d| d.bg_color.clone());
         let mut renderer = Renderer {
             theme: &theme,
             options: &options,
             default_text_style: default_text_style.as_ref(),
             default_style_prefix: &mut default_style_prefix,
+            highlighted_code: HashMap::new(),
         };
-        let mut rendered_lines: Vec<String> = Vec::new();
-        for (i, token) in tokens.iter().enumerate() {
-            let next = tokens.get(i + 1).map(|t| t.kind);
-            rendered_lines.extend(renderer.render_token(token, content_width, next, None));
-        }
-
-        let mut wrapped_lines: Vec<String> = Vec::new();
-        for line in &rendered_lines {
-            if is_image_line(line) {
-                wrapped_lines.push(line.clone());
-            } else {
-                wrapped_lines.extend(wrap_text_with_ansi(line, content_width));
-            }
-        }
-
         let margin = " ".repeat(padding_x);
-        let bg_fn = default_text_style.as_ref().and_then(|d| d.bg_color.clone());
-        let mut content_lines: Vec<String> = Vec::new();
-        for line in &wrapped_lines {
-            if is_image_line(line) {
-                content_lines.push(line.clone());
-                continue;
-            }
-            let with_margins = format!("{margin}{line}{margin}");
-            if let Some(bg) = &bg_fn {
-                content_lines.push(apply_background_to_line(&with_margins, width, &**bg));
+        let reuse_blocks = !lexed.has_link_defs;
+        let previous_blocks = match (&previous, reuse_blocks) {
+            (Some(previous), true) => previous.reusable_blocks(),
+            _ => HashMap::new(),
+        };
+        let mut blocks_by_source: HashMap<&str, Arc<RenderedBlock>> = HashMap::new();
+        let mut blocks: Vec<Arc<RenderedBlock>> = Vec::with_capacity(lexed.tokens.len());
+        for (i, token) in lexed.tokens.iter().enumerate() {
+            let next_kind = lexed.tokens.get(i + 1).map(|t| t.kind);
+            let reused = if reuse_blocks {
+                blocks_by_source
+                    .get(token.raw.as_str())
+                    .or_else(|| previous_blocks.get(token.raw.as_str()).copied())
             } else {
-                let pad = width.saturating_sub(visible_width(&with_margins));
-                content_lines.push(format!("{with_margins}{}", " ".repeat(pad)));
+                None
+            };
+            let block = match reused {
+                Some(block) if block.width == width && block.next_kind == next_kind => {
+                    block.clone()
+                }
+                reused => {
+                    renderer.highlighted_code = reused
+                        .map(|b| b.highlighted_code.clone())
+                        .unwrap_or_default();
+                    let lines = renderer.render_token(token, content_width, next_kind, None);
+                    let lines = Self::finish_block_lines(
+                        lines,
+                        width,
+                        content_width,
+                        &margin,
+                        bg_fn.as_ref(),
+                    );
+                    let highlighted_code = std::mem::take(&mut renderer.highlighted_code);
+                    Arc::new(RenderedBlock {
+                        width,
+                        next_kind,
+                        lines,
+                        highlighted_code,
+                    })
+                }
+            };
+            if reuse_blocks {
+                blocks_by_source.insert(token.raw.as_str(), block.clone());
             }
+            blocks.push(block);
         }
+        drop(blocks_by_source);
+        drop(previous_blocks);
 
         let empty_line = " ".repeat(width);
-        let empty_lines: Vec<String> = (0..padding_y)
+        let padding_lines: Vec<String> = (0..padding_y)
             .map(|_| match &bg_fn {
                 Some(bg) => apply_background_to_line(&empty_line, width, &**bg),
                 None => empty_line.clone(),
             })
             .collect();
-        let mut result = empty_lines.clone();
-        result.extend(content_lines);
-        result.extend(empty_lines);
-        (result, cached_tokens, default_style_prefix, false)
+        let rendered = Rendered {
+            text: source,
+            width,
+            lexed: Some(lexed.clone()),
+            blocks,
+            padding_lines,
+        };
+        (rendered, Some(lexed), default_style_prefix)
+    }
+
+    /// A block's rendered lines as output lines: wrapped, with margins, and padded or backgrounded to
+    /// the width. Image lines pass through.
+    fn finish_block_lines(
+        rendered: Vec<String>,
+        width: usize,
+        content_width: usize,
+        margin: &str,
+        bg_fn: Option<&StyleFn>,
+    ) -> Vec<String> {
+        let mut lines = Vec::with_capacity(rendered.len());
+        for line in rendered {
+            if is_image_line(&line) {
+                lines.push(line);
+                continue;
+            }
+            for wrapped in wrap_text_with_ansi(&line, content_width) {
+                let with_margins = format!("{margin}{wrapped}{margin}");
+                if let Some(bg) = bg_fn {
+                    lines.push(apply_background_to_line(&with_margins, width, &**bg));
+                } else {
+                    let pad = width.saturating_sub(visible_width(&with_margins));
+                    lines.push(format!("{with_margins}{}", " ".repeat(pad)));
+                }
+            }
+        }
+        lines
     }
 }
 
@@ -952,11 +1106,11 @@ impl Component for Markdown {
     fn render(&self, width: usize) -> Vec<String> {
         let input = {
             let s = self.lock();
-            if let Some((text, w, lines)) = &s.cache
-                && *text == s.text
-                && *w == width
+            if let Some(rendered) = &s.rendered
+                && rendered.text == s.text
+                && rendered.width == width
             {
-                return lines.clone();
+                return rendered.lines();
             }
             RenderInput {
                 text: s.text.clone(),
@@ -967,26 +1121,27 @@ impl Component for Markdown {
                 options: s.options.clone(),
                 default_style_prefix: s.default_style_prefix.clone(),
                 cached_tokens: s.cached_tokens.clone(),
+                previous: s.rendered.clone(),
                 generation: s.generation,
             }
         };
-        let (text, generation) = (input.text.clone(), input.generation);
-        let (result, cached_tokens, default_style_prefix, blank) = Self::render_unlocked(input, width);
+        let generation = input.generation;
+        let (rendered, cached_tokens, default_style_prefix) = Self::render_unlocked(input, width);
+        let lines = rendered.lines();
 
         let mut s = self.lock();
         if s.generation == generation {
-            s.cache = Some((text, width, result.clone()));
+            s.rendered = Some(Arc::new(rendered));
             s.cached_tokens = cached_tokens;
             s.default_style_prefix = default_style_prefix;
         }
-        drop(s);
-        if result.is_empty() && !blank { vec![String::new()] } else { result }
+        lines
     }
 
+    /// Drops the rendered blocks, which a theme change needs: highlighted code and styled lines are
+    /// reused until then.
     fn invalidate(&self) {
-        let mut s = self.lock();
-        s.cache = None;
-        s.generation += 1;
+        self.lock().drop_rendered();
     }
 }
 
@@ -1015,6 +1170,7 @@ mod tests {
             options: &options,
             default_text_style: None,
             default_style_prefix: &mut prefix,
+            highlighted_code: HashMap::new(),
         };
         for width in [1, 2, 3, 4, 80] {
             assert_eq!(renderer.render_token(&token, width, None, None), [format!("{}x", "│ ".repeat((width - 1) / 2))]);

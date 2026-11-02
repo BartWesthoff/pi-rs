@@ -74,7 +74,7 @@ impl UserMessageComponent {
                 preserve_backslash_escapes: true,
                 transform: Some(markdown_transform_fn(
                     CreateMarkdownTransformMessageType::User,
-                    false,
+                    Arc::new(|| false),
                     &self.markdown_transformers,
                     self.message_id.as_deref(),
                     self.timestamp.as_deref(),

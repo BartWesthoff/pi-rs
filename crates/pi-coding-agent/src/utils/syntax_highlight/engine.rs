@@ -757,6 +757,11 @@ pub fn get_language(name: &str) -> Option<Arc<LanguageDef>> {
     REGISTRY.read().get(name)
 }
 
+/// Number of registered languages.
+pub fn language_count() -> usize {
+    REGISTRY.read().languages.len()
+}
+
 fn language_names() -> Vec<String> {
     REGISTRY.read().languages.keys().cloned().collect()
 }
