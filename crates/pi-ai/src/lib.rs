@@ -31,6 +31,7 @@ pub use utils::diagnostics::*;
 pub use utils::event_stream::*;
 pub use utils::identity::*;
 pub use utils::json_parse::{parse_streaming_json, parse_streaming_json_object, parse_tool_call_arguments};
+pub use utils::streaming_json::{JsonChange, JsonPath, JsonPathSegment, StreamingJsonParser, ToolCallArgumentsStream};
 pub use utils::overflow::{is_context_overflow, is_recoverable_length};
 pub use utils::retry::*;
 pub use utils::text::*;
