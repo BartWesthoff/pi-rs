@@ -1030,7 +1030,7 @@ pub(crate) fn native_streams(bridge: &Arc<Bridge>, desc: &Value) -> Option<Arc<d
 // ---------------------------------------------------------------------------
 
 /// A transcript context (`{ messages }`) from JavaScript.
-fn transcript_from_js(value: &Value) -> anyhow::Result<TranscriptContext> {
+pub(super) fn transcript_from_js(value: &Value) -> anyhow::Result<TranscriptContext> {
     let messages = serde_json::from_value(value["messages"].clone())?;
     Ok(pi_ai::utils::transcript::normalize_context(&pi_ai::types::Context { system_prompt: None, messages, tools: None }))
 }
@@ -1281,6 +1281,25 @@ pub(crate) fn dispatch(bridge: &Arc<Bridge>, op: &str, payload: Value) -> anyhow
         "aip.builtinProviders" => Ok(Value::Array(
             pi_ai::providers::all::builtin_providers().into_iter().map(|p| describe_provider(bridge, p)).collect(),
         )),
+        "aip.builtinProvider" => {
+            // One built-in provider by id (the `@earendil-works/pi-ai/providers/<id>` factories).
+            let id = str_arg(&payload, "id");
+            let provider = pi_ai::providers::all::builtin_providers()
+                .into_iter()
+                .find(|p| p.id() == id)
+                .ok_or_else(|| anyhow::anyhow!("unknown built-in provider {id}"))?;
+            Ok(describe_provider(bridge, provider))
+        }
+        "aip.classifierApi" => {
+            // Built-in classifier API implementations (`openAIDecisionsApi()`, ...), by api id.
+            let api = pi_ai::api::registry::builtin_classifier_api(&str_arg(&payload, "api"));
+            Ok(json!(bridge.natives.insert(Native::Classifier(api))))
+        }
+        "aip.imagesApi" => {
+            // Built-in image API implementations (`openrouterImagesApi()`), by api id.
+            let api = pi_ai::api::registry::builtin_images_api(&str_arg(&payload, "api"));
+            Ok(json!(bridge.natives.insert(Native::Images(api))))
+        }
         "aip.radiusProvider" => {
             let o = &payload["options"];
             let options = pi_ai::providers::radius::RadiusProviderOptions {

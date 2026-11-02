@@ -292,7 +292,8 @@ export function providerConfigFromHost(providerId, value) {
 	return object;
 }
 
-globalThis.__piAiRust = { providerFromHost, providerConfigFromHost };
+// `providerFromDesc` builds the `@earendil-works/pi-ai/providers/<id>` factories (`pi-rs:ai-subpaths`).
+globalThis.__piAiRust = { providerFromHost, providerConfigFromHost, providerFromDesc: (desc) => new RustProvider(desc) };
 
 // ---------------------------------------------------------------------------
 // providers/all.ts

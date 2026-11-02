@@ -458,7 +458,7 @@ fn messages_arg(value: &Value) -> Vec<pi_ai::types::Message> {
     serde_json::from_value(value.clone()).unwrap_or_default()
 }
 
-pub(crate) fn dispatch(_bridge: &Arc<Bridge>, _op: &str, payload: Value) -> anyhow::Result<Value> {
+pub(crate) fn dispatch(bridge: &Arc<Bridge>, _op: &str, payload: Value) -> anyhow::Result<Value> {
     let f = str_arg(&payload, "fn");
     match f.as_str() {
         "telemetry.observe" => return telemetry_observe(&payload["args"][0]),
@@ -525,7 +525,10 @@ pub(crate) fn dispatch(_bridge: &Arc<Bridge>, _op: &str, payload: Value) -> anyh
             let call: pi_ai::types::ToolCall = serde_json::from_value(a(1))?;
             pi_ai::utils::validation::validate_tool_arguments(&tool, &call).map_err(|e| anyhow::anyhow!("{e}"))?
         }
-        _ => return Err(anyhow::anyhow!("pi-ai {f} is not available to extensions in pi-rs")),
+        other => {
+            return super::ai_subpaths::helper(bridge, other, &args)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("pi-ai {f} is not available to extensions in pi-rs")));
+        }
     })
 }
 

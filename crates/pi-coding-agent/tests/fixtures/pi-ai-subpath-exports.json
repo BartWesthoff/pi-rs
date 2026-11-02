@@ -1,0 +1,775 @@
+{
+	"./api/anthropic-messages": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/anthropic-messages.lazy": [
+		"anthropicMessagesApi"
+	],
+	"./api/azure-openai-config": [
+		"resolveAzureBaseUrl",
+		"resolveAzureConfig",
+		"resolveDeploymentName"
+	],
+	"./api/azure-openai-responses": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/azure-openai-responses.lazy": [
+		"azureOpenAIResponsesApi"
+	],
+	"./api/bedrock-converse-stream": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/bedrock-converse-stream.lazy": [
+		"bedrockConverseStreamApi",
+		"setBedrockProviderModule"
+	],
+	"./api/classifier-shared": [
+		"isRecord",
+		"parseClassifierUsage",
+		"postClassifierRequest",
+		"requiredNumber"
+	],
+	"./api/cloudflare": [
+		"CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL",
+		"CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL",
+		"CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL",
+		"CLOUDFLARE_WORKERS_AI_BASE_URL",
+		"CLOUDFLARE_WORKERS_AI_REST_BASE_URL"
+	],
+	"./api/cloudflare-ai-binding": [
+		"CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL",
+		"createAiBindingFetch"
+	],
+	"./api/cloudflare-workers-ai-system-one": [
+		"classify"
+	],
+	"./api/cloudflare-workers-ai-system-one.lazy": [
+		"cloudflareWorkersAISystemOneApi"
+	],
+	"./api/constrained-sampling": [
+		"appendGrammarToolInputJsonDelta",
+		"createGrammarToolInputProperties",
+		"getGrammarToolInput",
+		"getJsonSchemaToolParameters",
+		"makeStrictJsonSchema",
+		"resolveGrammarConstrainedSampling",
+		"resolveJsonSchemaStrictSampling"
+	],
+	"./api/github-copilot-headers": [
+		"buildCopilotDynamicHeaders",
+		"hasCopilotVisionInput",
+		"inferCopilotInitiator"
+	],
+	"./api/google-generative-ai": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/google-generative-ai.lazy": [
+		"googleGenerativeAIApi"
+	],
+	"./api/google-shared": [
+		"convertMessages",
+		"convertTools",
+		"getDisabledGoogleThinkingConfig",
+		"isThinkingPart",
+		"mapStopReason",
+		"mapStopReasonString",
+		"mapToolChoice",
+		"requiresToolCallId",
+		"resolveGoogleFunctionCallingMode",
+		"resolveGoogleThinkingLevel",
+		"retainThoughtSignature",
+		"retryGoogleRequest",
+		"supportsGoogleStrictToolSampling",
+		"toGoogleSdkThinkingLevel",
+		"toGoogleThinkingLevel",
+		"usesGoogleThinkingLevel"
+	],
+	"./api/google-vertex": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/google-vertex.lazy": [
+		"googleVertexApi"
+	],
+	"./api/lazy": [
+		"lazyApi",
+		"lazyStream"
+	],
+	"./api/llama-cpp-classify": [
+		"answerFromProbabilities",
+		"classify",
+		"labelProbabilities",
+		"llamaServerRoot",
+		"peakConfidence",
+		"renderQuestion"
+	],
+	"./api/llama-cpp-classify.lazy": [
+		"llamaCppClassifyApi"
+	],
+	"./api/mistral-conversations": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/mistral-conversations.lazy": [
+		"mistralConversationsApi"
+	],
+	"./api/openai-codex-responses": [
+		"closeOpenAICodexWebSocketSessions",
+		"getOpenAICodexWebSocketDebugStats",
+		"resetOpenAICodexWebSocketDebugStats",
+		"stream",
+		"streamSimple"
+	],
+	"./api/openai-codex-responses.lazy": [
+		"openAICodexResponsesApi"
+	],
+	"./api/openai-completions": [
+		"convertMessages",
+		"stream",
+		"streamSimple"
+	],
+	"./api/openai-completions.lazy": [
+		"openAICompletionsApi"
+	],
+	"./api/openai-decisions": [
+		"classify"
+	],
+	"./api/openai-decisions.lazy": [
+		"openAIDecisionsApi"
+	],
+	"./api/openai-prompt-cache": [
+		"OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH",
+		"clampOpenAIPromptCacheKey"
+	],
+	"./api/openai-responses": [
+		"stream",
+		"streamSimple"
+	],
+	"./api/openai-responses-shared": [
+		"convertResponsesMessages",
+		"convertResponsesTools",
+		"getResponsesToolSupport",
+		"processResponsesStream"
+	],
+	"./api/openai-responses.lazy": [
+		"openAIResponsesApi"
+	],
+	"./api/openrouter-images": [
+		"generateImages"
+	],
+	"./api/openrouter-images.lazy": [
+		"openrouterImagesApi"
+	],
+	"./api/pi-messages": [
+		"PiMessagesResponseError",
+		"stream",
+		"streamSimple"
+	],
+	"./api/pi-messages.lazy": [
+		"piMessagesApi"
+	],
+	"./api/simple-options": [
+		"DEFAULT_THINKING_BUDGETS",
+		"MIN_ANSWER_TOKENS",
+		"adjustMaxTokensForThinking",
+		"buildBaseOptions",
+		"clampMaxTokensToContext",
+		"clampReasoning",
+		"clampThinkingBudgetToAnswerRoom",
+		"resolveSamplingParams",
+		"thinkingBudgetForLevel"
+	],
+	"./api/system-one-shared": [
+		"classifySystemOne"
+	],
+	"./api/transform-messages": [
+		"splitErrorToolResultImages",
+		"transformMessages"
+	],
+	"./api/typesafe-system-one": [
+		"classify"
+	],
+	"./api/typesafe-system-one.lazy": [
+		"typesafeSystemOneApi"
+	],
+	"./bedrock-provider": [
+		"bedrockProviderModule"
+	],
+	"./bun-oauth": [
+		"registerBunOAuthFlows"
+	],
+	"./models": [
+		"AI_TELEMETRY_SCHEMA",
+		"ModelsError",
+		"calculateCost",
+		"clampThinkingLevel",
+		"createModels",
+		"createProvider",
+		"getModelType",
+		"getSupportedThinkingLevels",
+		"hasApi",
+		"isModelType",
+		"modelsAreEqual"
+	],
+	"./oauth": [],
+	"./providers/all": [
+		"builtinModels",
+		"builtinProviders",
+		"getAllBuiltinModels",
+		"getBuiltinClassifierModel",
+		"getBuiltinClassifierModels",
+		"getBuiltinImageModel",
+		"getBuiltinImageModels",
+		"getBuiltinModel",
+		"getBuiltinModelDataGeneratedAt",
+		"getBuiltinModels",
+		"getBuiltinProviders",
+		"radiusProvider"
+	],
+	"./providers/amazon-bedrock": [
+		"amazonBedrockProvider"
+	],
+	"./providers/amazon-bedrock.models": [
+		"AMAZON_BEDROCK_CLASSIFIER_MODELS",
+		"AMAZON_BEDROCK_IMAGE_MODELS",
+		"AMAZON_BEDROCK_MODELS"
+	],
+	"./providers/ant-ling": [
+		"antLingProvider"
+	],
+	"./providers/ant-ling.models": [
+		"ANT_LING_CLASSIFIER_MODELS",
+		"ANT_LING_IMAGE_MODELS",
+		"ANT_LING_MODELS"
+	],
+	"./providers/anthropic": [
+		"anthropicProvider"
+	],
+	"./providers/anthropic.models": [
+		"ANTHROPIC_CLASSIFIER_MODELS",
+		"ANTHROPIC_IMAGE_MODELS",
+		"ANTHROPIC_MODELS"
+	],
+	"./providers/azure": [
+		"azureProvider"
+	],
+	"./providers/azure.models": [
+		"AZURE_CLASSIFIER_MODELS",
+		"AZURE_IMAGE_MODELS",
+		"AZURE_MODELS"
+	],
+	"./providers/baseten": [
+		"basetenProvider"
+	],
+	"./providers/baseten.models": [
+		"BASETEN_CLASSIFIER_MODELS",
+		"BASETEN_IMAGE_MODELS",
+		"BASETEN_MODELS"
+	],
+	"./providers/cerebras": [
+		"cerebrasProvider"
+	],
+	"./providers/cerebras.models": [
+		"CEREBRAS_CLASSIFIER_MODELS",
+		"CEREBRAS_IMAGE_MODELS",
+		"CEREBRAS_MODELS"
+	],
+	"./providers/cloudflare-ai-gateway": [
+		"cloudflareAIGatewayProvider"
+	],
+	"./providers/cloudflare-ai-gateway.models": [
+		"CLOUDFLARE_AI_GATEWAY_CLASSIFIER_MODELS",
+		"CLOUDFLARE_AI_GATEWAY_IMAGE_MODELS",
+		"CLOUDFLARE_AI_GATEWAY_MODELS"
+	],
+	"./providers/cloudflare-auth": [
+		"cloudflareAIGatewayAuth",
+		"cloudflareWorkersAIAuth"
+	],
+	"./providers/cloudflare-stream": [
+		"cloudflareClassifier",
+		"cloudflareStreams",
+		"resolveCloudflareModel"
+	],
+	"./providers/cloudflare-workers-ai": [
+		"cloudflareWorkersAIProvider"
+	],
+	"./providers/cloudflare-workers-ai.models": [
+		"CLOUDFLARE_WORKERS_AI_CLASSIFIER_MODELS",
+		"CLOUDFLARE_WORKERS_AI_IMAGE_MODELS",
+		"CLOUDFLARE_WORKERS_AI_MODELS"
+	],
+	"./providers/compat-schema": [
+		"AnthropicAllowedFallbackModelSchema",
+		"AnthropicMessagesCompatSchema",
+		"BedrockCompatSchema",
+		"ChatTemplateKwargValueSchema",
+		"CompatSchemasByApi",
+		"MistralConversationsCompatSchema",
+		"OpenAICompletionsCompatSchema",
+		"OpenAIResponsesCompatSchema",
+		"OpenRouterRoutingSchema",
+		"ProviderCompatSchema",
+		"SessionAffinityFormatSchema",
+		"SystemOneCompatSchema",
+		"ThinkingTokenBudgetFieldSchema",
+		"VercelGatewayRoutingSchema"
+	],
+	"./providers/deepseek": [
+		"deepseekProvider"
+	],
+	"./providers/deepseek.models": [
+		"DEEPSEEK_CLASSIFIER_MODELS",
+		"DEEPSEEK_IMAGE_MODELS",
+		"DEEPSEEK_MODELS"
+	],
+	"./providers/faux": [
+		"createFauxCore",
+		"fauxAssistantMessage",
+		"fauxProvider",
+		"fauxText",
+		"fauxThinking",
+		"fauxToolCall"
+	],
+	"./providers/fireworks": [
+		"fireworksProvider"
+	],
+	"./providers/fireworks.models": [
+		"FIREWORKS_CLASSIFIER_MODELS",
+		"FIREWORKS_IMAGE_MODELS",
+		"FIREWORKS_MODELS"
+	],
+	"./providers/github-copilot": [
+		"githubCopilotProvider"
+	],
+	"./providers/github-copilot.models": [
+		"GITHUB_COPILOT_CLASSIFIER_MODELS",
+		"GITHUB_COPILOT_IMAGE_MODELS",
+		"GITHUB_COPILOT_MODELS"
+	],
+	"./providers/google": [
+		"googleProvider"
+	],
+	"./providers/google-vertex": [
+		"googleVertexProvider"
+	],
+	"./providers/google-vertex.models": [
+		"GOOGLE_VERTEX_CLASSIFIER_MODELS",
+		"GOOGLE_VERTEX_IMAGE_MODELS",
+		"GOOGLE_VERTEX_MODELS"
+	],
+	"./providers/google.models": [
+		"GOOGLE_CLASSIFIER_MODELS",
+		"GOOGLE_IMAGE_MODELS",
+		"GOOGLE_MODELS"
+	],
+	"./providers/groq": [
+		"groqProvider"
+	],
+	"./providers/groq.models": [
+		"GROQ_CLASSIFIER_MODELS",
+		"GROQ_IMAGE_MODELS",
+		"GROQ_MODELS"
+	],
+	"./providers/huggingface": [
+		"huggingfaceProvider"
+	],
+	"./providers/huggingface.models": [
+		"HUGGINGFACE_CLASSIFIER_MODELS",
+		"HUGGINGFACE_IMAGE_MODELS",
+		"HUGGINGFACE_MODELS"
+	],
+	"./providers/images/register-builtins": [
+		"generateImagesOpenRouter",
+		"registerBuiltInImagesApiProviders"
+	],
+	"./providers/kimi-coding": [
+		"kimiCodingProvider"
+	],
+	"./providers/kimi-coding.models": [
+		"KIMI_CODING_CLASSIFIER_MODELS",
+		"KIMI_CODING_IMAGE_MODELS",
+		"KIMI_CODING_MODELS"
+	],
+	"./providers/meta": [
+		"metaProvider"
+	],
+	"./providers/meta.models": [
+		"META_CLASSIFIER_MODELS",
+		"META_IMAGE_MODELS",
+		"META_MODELS"
+	],
+	"./providers/minimax": [
+		"minimaxProvider"
+	],
+	"./providers/minimax-cn": [
+		"minimaxCnProvider"
+	],
+	"./providers/minimax-cn.models": [
+		"MINIMAX_CN_CLASSIFIER_MODELS",
+		"MINIMAX_CN_IMAGE_MODELS",
+		"MINIMAX_CN_MODELS"
+	],
+	"./providers/minimax.models": [
+		"MINIMAX_CLASSIFIER_MODELS",
+		"MINIMAX_IMAGE_MODELS",
+		"MINIMAX_MODELS"
+	],
+	"./providers/mistral": [
+		"mistralProvider"
+	],
+	"./providers/mistral.models": [
+		"MISTRAL_CLASSIFIER_MODELS",
+		"MISTRAL_IMAGE_MODELS",
+		"MISTRAL_MODELS"
+	],
+	"./providers/model-schema": [
+		"CACHE_RETENTIONS",
+		"CacheRetentionSchema",
+		"MODEL_INPUT_MODALITIES",
+		"MODEL_PROMPT_CACHE_RETENTIONS",
+		"MODEL_THINKING_LEVELS",
+		"ModelCostRatesSchema",
+		"ModelCostSchema",
+		"ModelCostTierSchema",
+		"ModelImageInputLimitsSchema",
+		"ModelImageResizeOptionsSchema",
+		"ModelInputLimitsSchema",
+		"ModelInputModalitySchema",
+		"ModelPromptCacheSchema",
+		"ModelThinkingLevelSchema",
+		"THINKING_LEVELS",
+		"ThinkingLevelMapSchema",
+		"ThinkingLevelSchema"
+	],
+	"./providers/moonshotai": [
+		"moonshotaiProvider"
+	],
+	"./providers/moonshotai-cn": [
+		"moonshotaiCnProvider"
+	],
+	"./providers/moonshotai-cn.models": [
+		"MOONSHOTAI_CN_CLASSIFIER_MODELS",
+		"MOONSHOTAI_CN_IMAGE_MODELS",
+		"MOONSHOTAI_CN_MODELS"
+	],
+	"./providers/moonshotai.models": [
+		"MOONSHOTAI_CLASSIFIER_MODELS",
+		"MOONSHOTAI_IMAGE_MODELS",
+		"MOONSHOTAI_MODELS"
+	],
+	"./providers/nvidia": [
+		"nvidiaProvider"
+	],
+	"./providers/nvidia.models": [
+		"NVIDIA_CLASSIFIER_MODELS",
+		"NVIDIA_IMAGE_MODELS",
+		"NVIDIA_MODELS"
+	],
+	"./providers/openai": [
+		"openaiProvider"
+	],
+	"./providers/openai-codex": [
+		"openaiCodexProvider"
+	],
+	"./providers/openai-codex.models": [
+		"OPENAI_CODEX_CLASSIFIER_MODELS",
+		"OPENAI_CODEX_IMAGE_MODELS",
+		"OPENAI_CODEX_MODELS"
+	],
+	"./providers/openai.models": [
+		"OPENAI_CLASSIFIER_MODELS",
+		"OPENAI_IMAGE_MODELS",
+		"OPENAI_MODELS"
+	],
+	"./providers/opencode": [
+		"opencodeProvider"
+	],
+	"./providers/opencode-go": [
+		"opencodeGoProvider"
+	],
+	"./providers/opencode-go.models": [
+		"OPENCODE_GO_CLASSIFIER_MODELS",
+		"OPENCODE_GO_IMAGE_MODELS",
+		"OPENCODE_GO_MODELS"
+	],
+	"./providers/opencode-headers": [
+		"withOpenCodeSessionHeader"
+	],
+	"./providers/opencode.models": [
+		"OPENCODE_CLASSIFIER_MODELS",
+		"OPENCODE_IMAGE_MODELS",
+		"OPENCODE_MODELS"
+	],
+	"./providers/openrouter": [
+		"openrouterProvider",
+		"personalizeOpenRouterCatalog"
+	],
+	"./providers/openrouter-api": [
+		"openRouterCost"
+	],
+	"./providers/openrouter.models": [
+		"OPENROUTER_CLASSIFIER_MODELS",
+		"OPENROUTER_IMAGE_MODELS",
+		"OPENROUTER_MODELS"
+	],
+	"./providers/qwen-token-plan": [
+		"qwenTokenPlanProvider"
+	],
+	"./providers/qwen-token-plan-cn": [
+		"qwenTokenPlanCnProvider"
+	],
+	"./providers/qwen-token-plan-cn.models": [
+		"QWEN_TOKEN_PLAN_CN_CLASSIFIER_MODELS",
+		"QWEN_TOKEN_PLAN_CN_IMAGE_MODELS",
+		"QWEN_TOKEN_PLAN_CN_MODELS"
+	],
+	"./providers/qwen-token-plan-individual": [
+		"qwenTokenPlanIndividualProvider"
+	],
+	"./providers/qwen-token-plan-individual.models": [
+		"QWEN_TOKEN_PLAN_INDIVIDUAL_CLASSIFIER_MODELS",
+		"QWEN_TOKEN_PLAN_INDIVIDUAL_IMAGE_MODELS",
+		"QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS"
+	],
+	"./providers/qwen-token-plan.models": [
+		"QWEN_TOKEN_PLAN_CLASSIFIER_MODELS",
+		"QWEN_TOKEN_PLAN_IMAGE_MODELS",
+		"QWEN_TOKEN_PLAN_MODELS"
+	],
+	"./providers/radius": [
+		"radiusProvider"
+	],
+	"./providers/radius-config": [
+		"DEFAULT_RADIUS_GATEWAY",
+		"getRadiusCredentialConfig",
+		"getRadiusModels",
+		"getRadiusModelsFromConfig",
+		"loadRadiusGatewayConfig",
+		"normalizeRadiusGatewayUrl"
+	],
+	"./providers/radius.models": [
+		"RADIUS_CLASSIFIER_MODELS",
+		"RADIUS_IMAGE_MODELS",
+		"RADIUS_MODELS"
+	],
+	"./providers/together": [
+		"togetherProvider"
+	],
+	"./providers/together.models": [
+		"TOGETHER_CLASSIFIER_MODELS",
+		"TOGETHER_IMAGE_MODELS",
+		"TOGETHER_MODELS"
+	],
+	"./providers/typesafe": [
+		"typesafeProvider"
+	],
+	"./providers/typesafe.models": [
+		"TYPESAFE_CLASSIFIER_MODELS",
+		"TYPESAFE_IMAGE_MODELS",
+		"TYPESAFE_MODELS"
+	],
+	"./providers/vercel-ai-gateway": [
+		"vercelAIGatewayProvider"
+	],
+	"./providers/vercel-ai-gateway.models": [
+		"VERCEL_AI_GATEWAY_CLASSIFIER_MODELS",
+		"VERCEL_AI_GATEWAY_IMAGE_MODELS",
+		"VERCEL_AI_GATEWAY_MODELS"
+	],
+	"./providers/xai": [
+		"xaiProvider"
+	],
+	"./providers/xai.models": [
+		"XAI_CLASSIFIER_MODELS",
+		"XAI_IMAGE_MODELS",
+		"XAI_MODELS"
+	],
+	"./providers/xiaomi": [
+		"xiaomiProvider"
+	],
+	"./providers/xiaomi-token-plan-ams": [
+		"xiaomiTokenPlanAmsProvider"
+	],
+	"./providers/xiaomi-token-plan-ams.models": [
+		"XIAOMI_TOKEN_PLAN_AMS_CLASSIFIER_MODELS",
+		"XIAOMI_TOKEN_PLAN_AMS_IMAGE_MODELS",
+		"XIAOMI_TOKEN_PLAN_AMS_MODELS"
+	],
+	"./providers/xiaomi-token-plan-cn": [
+		"xiaomiTokenPlanCnProvider"
+	],
+	"./providers/xiaomi-token-plan-cn.models": [
+		"XIAOMI_TOKEN_PLAN_CN_CLASSIFIER_MODELS",
+		"XIAOMI_TOKEN_PLAN_CN_IMAGE_MODELS",
+		"XIAOMI_TOKEN_PLAN_CN_MODELS"
+	],
+	"./providers/xiaomi-token-plan-sgp": [
+		"xiaomiTokenPlanSgpProvider"
+	],
+	"./providers/xiaomi-token-plan-sgp.models": [
+		"XIAOMI_TOKEN_PLAN_SGP_CLASSIFIER_MODELS",
+		"XIAOMI_TOKEN_PLAN_SGP_IMAGE_MODELS",
+		"XIAOMI_TOKEN_PLAN_SGP_MODELS"
+	],
+	"./providers/xiaomi.models": [
+		"XIAOMI_CLASSIFIER_MODELS",
+		"XIAOMI_IMAGE_MODELS",
+		"XIAOMI_MODELS"
+	],
+	"./providers/zai": [
+		"zaiProvider"
+	],
+	"./providers/zai-coding-cn": [
+		"zaiCodingCnProvider"
+	],
+	"./providers/zai-coding-cn.models": [
+		"ZAI_CODING_CN_CLASSIFIER_MODELS",
+		"ZAI_CODING_CN_IMAGE_MODELS",
+		"ZAI_CODING_CN_MODELS"
+	],
+	"./providers/zai.models": [
+		"ZAI_CLASSIFIER_MODELS",
+		"ZAI_IMAGE_MODELS",
+		"ZAI_MODELS"
+	],
+	"./utils/abort": [
+		"operationSignal",
+		"raceWithAbortSignal"
+	],
+	"./utils/abort-signals": [
+		"combineAbortSignals"
+	],
+	"./utils/diagnostics": [
+		"appendAssistantMessageDiagnostic",
+		"createAssistantMessageDiagnostic",
+		"extractDiagnosticError",
+		"formatThrownValue"
+	],
+	"./utils/error-body": [
+		"MAX_PROVIDER_ERROR_BODY_CHARS",
+		"formatProviderError",
+		"normalizeProviderError",
+		"safeJsonStringify",
+		"truncateErrorText"
+	],
+	"./utils/estimate": [
+		"calculateContextTokens",
+		"estimateContextTokens",
+		"estimateMessageTokens",
+		"estimateTextAndImageContentTokens",
+		"estimateTextTokens"
+	],
+	"./utils/event-stream": [
+		"AssistantMessageEventStream",
+		"EventStream",
+		"createAssistantMessageEventStream"
+	],
+	"./utils/hash": [
+		"shortHash"
+	],
+	"./utils/headers": [
+		"headersToRecord",
+		"providerHeadersToRecord"
+	],
+	"./utils/identity": [
+		"PI_ATTRIBUTION",
+		"formatUserAgent",
+		"getAttributionHeaders",
+		"getClientVersion",
+		"getIdentityHeaders",
+		"getOpenCodeSessionHeaders",
+		"mergeClientIdentity",
+		"withClientIdentity"
+	],
+	"./utils/json-parse": [
+		"parseJsonWithRepair",
+		"parseStreamingJson",
+		"parseToolCallArguments",
+		"repairJson"
+	],
+	"./utils/model-operations": [
+		"assertChatModel",
+		"assertClassifierInputSupported",
+		"assertClassifierModel",
+		"assertImageModel",
+		"classifierErrorResult",
+		"getModelType",
+		"imageErrorResult",
+		"isModelType"
+	],
+	"./utils/models-error": [
+		"ModelsError"
+	],
+	"./utils/node-http-proxy": [
+		"UNSUPPORTED_PROXY_PROTOCOL_MESSAGE",
+		"resolveHttpProxyUrlForTarget"
+	],
+	"./utils/oauth-page": [
+		"oauthErrorHtml",
+		"oauthSuccessHtml"
+	],
+	"./utils/overflow": [
+		"getOverflowPatterns",
+		"isContextOverflow",
+		"isRecoverableLength"
+	],
+	"./utils/provider-env": [
+		"getProviderEnvValue"
+	],
+	"./utils/provider-retry": [
+		"retryProviderRequest"
+	],
+	"./utils/retry": [
+		"DEFAULT_MAX_AGENT_RETRY_DELAY_MS",
+		"isRetryableAssistantError",
+		"retryAssistantCall",
+		"retryDelayMs"
+	],
+	"./utils/sanitize-unicode": [
+		"sanitizeSurrogates"
+	],
+	"./utils/sleep": [
+		"sleep"
+	],
+	"./utils/text": [
+		"contentText",
+		"getSystemMessageText",
+		"renderSystemMessageUpdate"
+	],
+	"./utils/transcript": [
+		"collapseSystemMessages",
+		"createInitialSystemMessage",
+		"declarationsEqual",
+		"getCurrentSystemMessage",
+		"getCurrentSystemPrompt",
+		"getCurrentTools",
+		"getDeclaredTools",
+		"getInitialSystemMessage",
+		"getToolStateChanges",
+		"hasNonAdditiveToolChanges",
+		"hasToolRedefinitions",
+		"normalizeContext",
+		"resolveTranscript",
+		"resolveTranscriptTools",
+		"toToolDeclaration",
+		"withoutInitialSystemMessage"
+	],
+	"./utils/typebox-helpers": [
+		"StringEnum"
+	],
+	"./utils/uuid": [
+		"uuidv7"
+	],
+	"./utils/validation": [
+		"validateToolArguments",
+		"validateToolCall"
+	],
+	"./utils/version": [
+		"PI_AI_VERSION"
+	]
+}
