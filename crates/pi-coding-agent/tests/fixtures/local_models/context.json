@@ -1,0 +1,132 @@
+{
+  "systemPrompt": "You are a local coding assistant.",
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "calc",
+      "description": "Calculate",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "number"
+          },
+          "m": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "n",
+          "m"
+        ]
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read héllo.txt, then calculate.",
+      "timestamp": 1
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Read both files ✓ — café",
+          "thinkingSignature": "reasoning_content"
+        },
+        {
+          "type": "text",
+          "text": "Reading 📄 now."
+        },
+        {
+          "type": "toolCall",
+          "id": "call_a",
+          "name": "read",
+          "arguments": {
+            "path": "héllo.txt"
+          }
+        },
+        {
+          "type": "toolCall",
+          "id": "call_b",
+          "name": "calc",
+          "arguments": {
+            "n": 1.0,
+            "m": 1e21
+          }
+        }
+      ],
+      "api": "openai-completions",
+      "provider": "{{PROVIDER}}",
+      "model": "{{MODEL}}",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "stopReason": "toolUse",
+      "timestamp": 2
+    },
+    {
+      "role": "toolResult",
+      "toolCallId": "call_a",
+      "toolName": "read",
+      "content": [
+        {
+          "type": "text",
+          "text": "alpha"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+          "mimeType": "image/png"
+        }
+      ],
+      "isError": false,
+      "timestamp": 3
+    },
+    {
+      "role": "toolResult",
+      "toolCallId": "call_b",
+      "toolName": "calc",
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "isError": false,
+      "timestamp": 4
+    },
+    {
+      "role": "user",
+      "content": "Continue.",
+      "timestamp": 5
+    }
+  ]
+}

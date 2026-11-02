@@ -32,6 +32,7 @@ use crate::utils::headers::headers_to_record;
 use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, client_for, post_json};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::js_json::js_json_stringify_object;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{ProviderRetryOptions, retry_provider_request};
 use crate::utils::text::{
@@ -552,7 +553,7 @@ pub fn convert_messages(
                             calls.push(json!({
                                 "id": tc.id,
                                 "type": "function",
-                                "function": { "name": tc.name, "arguments": serde_json::to_string(&tc.arguments)? }
+                                "function": { "name": tc.name, "arguments": js_json_stringify_object(&tc.arguments) }
                             }));
                         }
                     }

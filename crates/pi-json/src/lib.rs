@@ -477,73 +477,84 @@ pub fn js_json_stringify(value: &Value) -> String {
     js_json_stringify_pretty(value, "")
 }
 
+/// `JSON.stringify(object)` for a borrowed map, without building a [`Value`] around it.
+pub fn js_json_stringify_object(map: &serde_json::Map<String, Value>) -> String {
+    let mut out = String::new();
+    write_object(map, "", 0, &mut out);
+    out
+}
+
 /// `JSON.stringify(value, null, indent)`: JavaScript number formatting (`1.0` is `1`, `1e21` is
 /// `1e+21`, integers beyond 2^53 are rounded like doubles) and property order (array-index keys
 /// first, ascending, then insertion order).
 pub fn js_json_stringify_pretty(value: &Value, indent: &str) -> String {
-    fn write(value: &Value, indent: &str, depth: usize, out: &mut String) {
-        let newline = |out: &mut String, depth: usize| {
-            if !indent.is_empty() {
-                out.push('\n');
-                for _ in 0..depth {
-                    out.push_str(indent);
-                }
-            }
-        };
-        match value {
-            Value::Null => out.push_str("null"),
-            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Value::Number(n) => {
-                let f = n.as_f64().unwrap_or(f64::NAN);
-                if f.is_finite() {
-                    out.push_str(&number_to_string(f));
-                } else {
-                    out.push_str("null");
-                }
-            }
-            Value::String(s) => out.push_str(&quote(s)),
-            Value::Array(items) => {
-                if items.is_empty() {
-                    out.push_str("[]");
-                    return;
-                }
-                out.push('[');
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        out.push(',');
-                    }
-                    newline(out, depth + 1);
-                    write(item, indent, depth + 1, out);
-                }
-                newline(out, depth);
-                out.push(']');
-            }
-            Value::Object(map) => {
-                if map.is_empty() {
-                    out.push_str("{}");
-                    return;
-                }
-                out.push('{');
-                for (index, key) in object_keys(map).into_iter().enumerate() {
-                    if index > 0 {
-                        out.push(',');
-                    }
-                    newline(out, depth + 1);
-                    out.push_str(&quote(key));
-                    out.push(':');
-                    if !indent.is_empty() {
-                        out.push(' ');
-                    }
-                    write(&map[key.as_str()], indent, depth + 1, out);
-                }
-                newline(out, depth);
-                out.push('}');
-            }
+    let mut out = String::new();
+    write_value(value, indent, 0, &mut out);
+    out
+}
+
+fn write_newline(indent: &str, depth: usize, out: &mut String) {
+    if !indent.is_empty() {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str(indent);
         }
     }
-    let mut out = String::new();
-    write(value, indent, 0, &mut out);
-    out
+}
+
+fn write_value(value: &Value, indent: &str, depth: usize, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => {
+            let f = n.as_f64().unwrap_or(f64::NAN);
+            if f.is_finite() {
+                out.push_str(&number_to_string(f));
+            } else {
+                out.push_str("null");
+            }
+        }
+        Value::String(s) => out.push_str(&quote(s)),
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_newline(indent, depth + 1, out);
+                write_value(item, indent, depth + 1, out);
+            }
+            write_newline(indent, depth, out);
+            out.push(']');
+        }
+        Value::Object(map) => write_object(map, indent, depth, out),
+    }
+}
+
+fn write_object(map: &serde_json::Map<String, Value>, indent: &str, depth: usize, out: &mut String) {
+    if map.is_empty() {
+        out.push_str("{}");
+        return;
+    }
+    out.push('{');
+    for (index, key) in object_keys(map).into_iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_newline(indent, depth + 1, out);
+        out.push_str(&quote(key));
+        out.push(':');
+        if !indent.is_empty() {
+            out.push(' ');
+        }
+        write_value(&map[key.as_str()], indent, depth + 1, out);
+    }
+    write_newline(indent, depth, out);
+    out.push('}');
 }
 
 #[cfg(test)]
@@ -656,5 +667,14 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"b":1.0,"2":[1e21,0.1,-0.0,"\u0001"],"1":{"x":null}}"#).unwrap();
         assert_eq!(js_json_stringify(&value), r#"{"1":{"x":null},"2":[1e+21,0.1,0,"\u0001"],"b":1}"#);
         assert_eq!(js_json_stringify_pretty(&serde_json::json!({"a":[1,{}]}), "  "), "{\n  \"a\": [\n    1,\n    {}\n  ]\n}");
+    }
+
+    #[test]
+    fn stringify_object_matches_stringify_of_the_wrapped_value() {
+        let value: Value = serde_json::from_str(r#"{"n":1.0,"m":1e21,"2":{"k":[2.50]},"path":"héllo.txt"}"#).unwrap();
+        let Value::Object(map) = &value else { panic!("object") };
+        assert_eq!(js_json_stringify_object(map), r#"{"2":{"k":[2.5]},"n":1,"m":1e+21,"path":"héllo.txt"}"#);
+        assert_eq!(js_json_stringify_object(map), js_json_stringify(&value));
+        assert_eq!(js_json_stringify_object(&serde_json::Map::new()), "{}");
     }
 }
