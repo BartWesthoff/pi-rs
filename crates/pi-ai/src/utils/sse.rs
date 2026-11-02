@@ -272,4 +272,42 @@ mod tests {
         pieces.extend(split.finish());
         assert_eq!(pieces, events);
     }
+
+    /// `(event, data)` of every event decoded from `body` fed in `size`-byte pieces.
+    fn decode_split(body: &str, size: usize) -> Vec<(Option<String>, String)> {
+        let mut decoder = SseDecoder::new();
+        let mut events = Vec::new();
+        for piece in body.as_bytes().chunks(size) {
+            events.extend(decoder.push_bytes(piece));
+        }
+        events.extend(decoder.finish());
+        events.into_iter().map(|e| (e.event, e.data)).collect()
+    }
+
+    #[test]
+    fn keep_alive_comment_frames_yield_no_events_at_any_byte_split() {
+        const KEEP_ALIVE: &str = ": keep-alive\n\n";
+        let events = ["data: {\"a\":\"caf\u{e9}\"}\n\n", "event: delta\ndata: x\ndata: y\n\n", "data: [DONE]\n\n"];
+        let plain: String = events.concat();
+        // Leading blank lines and keep-alives before the first event, runs of keep-alives between
+        // events, and a comment line inside an event (between its fields).
+        let mut noisy = format!("\n\n{KEEP_ALIVE}{KEEP_ALIVE}");
+        for event in events {
+            noisy.push_str(&event.replacen("\ndata: y", "\n: keep-alive\ndata: y", 1));
+            noisy.push_str(&KEEP_ALIVE.repeat(3));
+        }
+        let expected = decode_split(&plain, plain.len());
+        assert_eq!(
+            expected,
+            vec![
+                (None, "{\"a\":\"caf\u{e9}\"}".to_string()),
+                (Some("delta".to_string()), "x\ny".to_string()),
+                (None, "[DONE]".to_string()),
+            ]
+        );
+        for size in 1..=noisy.len() {
+            assert_eq!(decode_split(&noisy, size), expected, "split at {size} bytes");
+        }
+        assert!(decode_split(&KEEP_ALIVE.repeat(4), 1).is_empty(), "keep-alives alone yield no event");
+    }
 }

@@ -631,9 +631,13 @@ const LLAMA_CPP_OVERFLOW_ERROR: &str = r#"400: {"code":400,"message":"the reques
 /// LiteLLM's pre-call check (#11494), as a local proxy in front of llama.cpp reports it.
 const LITELLM_OVERFLOW_ERROR: &str = "400: {\"message\":\"litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.\"}";
 
+/// The `errorMessage` pi-ai builds from NInfer's real `context_length_exceeded` 400 body
+/// (asserted end to end in `pi-ai/tests/openai_completions.rs`).
+const NINFER_OVERFLOW_ERROR: &str = r#"400: {"code":"context_length_exceeded","message":"prepared prompt exceeds Engine max_context 90048","param":"messages","type":"invalid_request_error"}"#;
+
 #[tokio::test]
 async fn compacts_and_retries_after_a_local_server_context_overflow_error() {
-    for overflow_error in [LLAMA_CPP_OVERFLOW_ERROR, LITELLM_OVERFLOW_ERROR] {
+    for overflow_error in [LLAMA_CPP_OVERFLOW_ERROR, LITELLM_OVERFLOW_ERROR, NINFER_OVERFLOW_ERROR] {
         let harness = create_harness(HarnessOptions {
             models: vec![faux_model("faux-1", 8192, Some(100))],
             settings: settings(json!({"compaction": {"keepRecentTokens": 1, "reserveTokens": 0}})),
