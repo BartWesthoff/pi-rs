@@ -29,7 +29,8 @@ use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEv
 use crate::utils::headers::headers_to_record;
 use crate::utils::http::{HeaderList, client_for, post_json, stainless_headers};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::{parse_json_with_repair, parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::json_parse::parse_json_with_repair;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{ProviderRetryOptions, retry_provider_request};
 use crate::utils::sse::sse_reader;
@@ -874,7 +875,7 @@ fn messages_url(base_url: &str) -> String {
 
 struct BlockMeta {
     index: Option<i64>,
-    partial_json: String,
+    arguments: ToolCallArgumentsStream,
 }
 
 fn find_block(meta: &[BlockMeta], index: i64) -> Option<usize> {
@@ -1120,7 +1121,7 @@ async fn run_stream(
                             output.content.push(AssistantContent::Text(TextContent::new(
                                 block.get("text").and_then(Value::as_str).unwrap_or_default(),
                             )));
-                            meta.push(BlockMeta { index, partial_json: String::new() });
+                            meta.push(BlockMeta { index, arguments: ToolCallArgumentsStream::new() });
                             sender.push(AssistantMessageEvent::TextStart {
                                 content_index: output.content.len() - 1,
                                 partial: output.clone(),
@@ -1135,7 +1136,7 @@ async fn run_stream(
                                 redacted: None,
                                 ..Default::default()
                             }));
-                            meta.push(BlockMeta { index, partial_json: String::new() });
+                            meta.push(BlockMeta { index, arguments: ToolCallArgumentsStream::new() });
                             sender.push(AssistantMessageEvent::ThinkingStart {
                                 content_index: output.content.len() - 1,
                                 partial: output.clone(),
@@ -1148,7 +1149,7 @@ async fn run_stream(
                                 redacted: Some(true),
                                 ..Default::default()
                             }));
-                            meta.push(BlockMeta { index, partial_json: String::new() });
+                            meta.push(BlockMeta { index, arguments: ToolCallArgumentsStream::new() });
                             sender.push(AssistantMessageEvent::ThinkingStart {
                                 content_index: output.content.len() - 1,
                                 partial: output.clone(),
@@ -1162,7 +1163,7 @@ async fn run_stream(
                                 arguments: block.get("input").and_then(Value::as_object).cloned().unwrap_or_default(),
                                 ..Default::default()
                             }));
-                            meta.push(BlockMeta { index, partial_json: String::new() });
+                            meta.push(BlockMeta { index, arguments: ToolCallArgumentsStream::new() });
                             sender.push(AssistantMessageEvent::ToolCallStart {
                                 content_index: output.content.len() - 1,
                                 partial: output.clone(),
@@ -1200,9 +1201,13 @@ async fn run_stream(
                         }
                         "input_json_delta" => {
                             let partial = delta.get("partial_json").and_then(Value::as_str).unwrap_or_default().to_string();
-                            if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
-                                meta[position].partial_json.push_str(&partial);
-                                block.arguments = parse_streaming_json_object(Some(&meta[position].partial_json));
+                            if matches!(output.content.get(position), Some(AssistantContent::ToolCall(_))) {
+                                // Take the block mutably only when the partial arguments changed.
+                                if let Some(arguments) = meta[position].arguments.append(&partial)
+                                    && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position)
+                                {
+                                    block.arguments = arguments;
+                                }
                                 sender.push(AssistantMessageEvent::ToolCallDelta {
                                     content_index: position,
                                     delta: partial,
@@ -1237,10 +1242,9 @@ async fn run_stream(
                             });
                         }
                         Some(AssistantContent::ToolCall(block)) => {
-                            let parsed = parse_tool_call_arguments(Some(&meta[position].partial_json));
+                            let parsed = std::mem::take(&mut meta[position].arguments).finish();
                             block.arguments = parsed.arguments;
                             block.arguments_error = parsed.arguments_error;
-                            meta[position].partial_json.clear();
                             let tool_call = block.clone();
                             sender.push(AssistantMessageEvent::ToolCallEnd {
                                 content_index: position,

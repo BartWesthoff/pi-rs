@@ -31,7 +31,8 @@ use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
 use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, client_for, post_json};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::json_parse::parse_tool_call_arguments;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::js_json::js_json_stringify_object;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::provider_retry::{ProviderRetryOptions, retry_provider_request};
@@ -1046,7 +1047,8 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
 /// Streaming state of one tool call block.
 struct ToolCallState {
     content_index: usize,
-    partial_args: Option<String>,
+    /// JSON arguments; `None` for a grammar (custom) tool, whose input is in `custom_input`.
+    arguments: Option<ToolCallArgumentsStream>,
     custom_input: Option<(String, GrammarJsonBuffer)>,
     stream_index: Option<i64>,
 }
@@ -1283,7 +1285,7 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
                             let content_index = output.content.len() - 1;
                             tool_states.push(ToolCallState {
                                 content_index,
-                                partial_args: if custom_property.is_some() { None } else { Some(String::new()) },
+                                arguments: if custom_property.is_some() { None } else { Some(ToolCallArgumentsStream::new()) },
                                 custom_input: custom_property.map(|p| (p, GrammarJsonBuffer::default())),
                                 stream_index,
                             });
@@ -1307,40 +1309,61 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
                         by_id.insert(id.clone(), state_index);
                     }
                     let content_index = tool_states[state_index].content_index;
-                    let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(content_index) else { continue };
-                    if block.name.is_empty()
-                        && let Some(name) = &name {
-                            block.name = name.clone();
-                        }
+                    // Read first and take the block mutably only for a real change: a partial
+                    // message shares its content with the consumers' copies, so a write copies it.
+                    let Some(AssistantContent::ToolCall(current)) = output.content.get(content_index) else { continue };
+                    let set_name = name.as_ref().filter(|_| current.name.is_empty()).cloned();
+                    let set_id = id.as_ref().filter(|_| current.id.is_empty()).cloned();
+                    let block_name = set_name.clone().unwrap_or_else(|| current.name.clone());
+                    let mut set_arguments: Option<Map<String, Value>> = None;
                     if custom.is_some() && function.is_none() && tool_states[state_index].custom_input.is_none() {
-                        let property = grammar_properties.get(&block.name).cloned().unwrap_or_else(|| "input".into());
-                        block.arguments = Map::new();
-                        block.arguments.insert(property.clone(), json!(""));
+                        let property = grammar_properties.get(&block_name).cloned().unwrap_or_else(|| "input".into());
+                        let mut arguments = Map::new();
+                        arguments.insert(property.clone(), json!(""));
+                        set_arguments = Some(arguments);
                         tool_states[state_index].custom_input = Some((property, GrammarJsonBuffer::default()));
-                        tool_states[state_index].partial_args = None;
+                        tool_states[state_index].arguments = None;
                     }
-                    if block.id.is_empty()
-                        && let Some(id) = &id {
-                            block.id = id.clone();
-                            by_id.insert(id.clone(), state_index);
-                        }
                     let mut delta_text = String::new();
                     let fn_args = function.and_then(|f| f.get("arguments")).and_then(Value::as_str).filter(|a| !a.is_empty());
                     let custom_input = custom.and_then(|c| c.get("input")).and_then(Value::as_str).filter(|a| !a.is_empty());
                     if let Some(args) = fn_args {
                         delta_text = args.to_string();
-                        let state = &mut tool_states[state_index];
-                        let partial = state.partial_args.get_or_insert_with(String::new);
-                        partial.push_str(args);
-                        block.arguments = parse_streaming_json_object(Some(partial));
+                        let stream = tool_states[state_index].arguments.get_or_insert_with(ToolCallArgumentsStream::new);
+                        if let Some(arguments) = stream.append(args) {
+                            set_arguments = Some(arguments);
+                        }
                     } else if let Some(input) = custom_input
                         && let Some((property, buffer)) = &mut tool_states[state_index].custom_input {
-                            let current = block.arguments.get(property.as_str()).and_then(Value::as_str).unwrap_or_default().to_string();
-                            let next = format!("{current}{input}");
+                            let current_input = set_arguments
+                                .as_ref()
+                                .unwrap_or(&current.arguments)
+                                .get(property.as_str())
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let next = format!("{current_input}{input}");
                             delta_text = append_grammar_tool_input_json_delta(buffer, property, &next, false)?.unwrap_or_default();
-                            block.arguments = Map::new();
-                            block.arguments.insert(property.clone(), json!(next));
+                            let mut arguments = Map::new();
+                            arguments.insert(property.clone(), json!(next));
+                            set_arguments = Some(arguments);
                         }
+                    if let Some(id) = &set_id {
+                        by_id.insert(id.clone(), state_index);
+                    }
+                    let changed = set_name.is_some() || set_id.is_some() || set_arguments.is_some();
+                    if changed
+                        && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(content_index)
+                    {
+                        if let Some(name) = set_name {
+                            block.name = name;
+                        }
+                        if let Some(id) = set_id {
+                            block.id = id;
+                        }
+                        if let Some(arguments) = set_arguments {
+                            block.arguments = arguments;
+                        }
+                    }
                     sender.push(AssistantMessageEvent::ToolCallDelta { content_index, delta: delta_text, partial: output.clone() });
                 }
             }
@@ -1428,11 +1451,14 @@ fn finish_blocks(
                             sender.push(AssistantMessageEvent::ToolCallDelta { content_index: index, delta, partial: output.clone() });
                         }
                     } else {
-                        let parsed = parse_tool_call_arguments(state.partial_args.as_deref());
+                        let parsed = match &state.arguments {
+                            Some(arguments) => arguments.finish(),
+                            None => parse_tool_call_arguments(None),
+                        };
                         block.arguments = parsed.arguments;
                         block.arguments_error = parsed.arguments_error;
                     }
-                    state.partial_args = None;
+                    state.arguments = None;
                     state.custom_input = None;
                 }
                 let AssistantContent::ToolCall(block) = &output.content[index] else { unreachable!() };

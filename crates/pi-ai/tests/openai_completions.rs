@@ -816,3 +816,39 @@ async fn llama_cpp_http_errors_surface_the_server_message() {
     assert!(is_context_overflow(&result, Some(model.context_window)));
     assert!(!is_retryable_assistant_error(&result));
 }
+
+/// Port of `streaming-tool-arguments.test.ts` (#9265) for Chat Completions: arguments streamed one
+/// character at a time show growing partial arguments and finish with the exact parse.
+#[tokio::test]
+async fn streams_growing_partial_tool_arguments_one_character_at_a_time() {
+    let content = "line \"one\"\nline two \\ done\n".repeat(20);
+    let arguments = json!({"text": content}).to_string();
+    let mut chunks =
+        vec![chunk(json!({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "echo", "arguments": ""}}]}), None)];
+    for c in arguments.chars() {
+        chunks.push(chunk(json!({"tool_calls": [{"index": 0, "function": {"arguments": c.to_string()}}]}), None));
+    }
+    chunks.push(chunk(json!({}), Some("tool_calls")));
+    let server = serve(vec![MockResponse::sse(openai_sse_body(&chunks))]).await;
+    let model = custom_model(&server.base_url);
+    let options = StreamOptions { api_key: Some("sk-local".into()), ..Default::default() };
+    let (events, result) = openai_completions::stream_simple(&model, &context(), options).collect_all().await;
+
+    let mut shown = 0;
+    let mut deltas = String::new();
+    for event in &events {
+        if let AssistantMessageEvent::ToolCallDelta { delta, partial, .. } = event {
+            deltas.push_str(delta);
+            let call = partial.tool_calls().next().expect("a tool call");
+            let text = call.arguments.get("text").and_then(serde_json::Value::as_str).unwrap_or_default();
+            assert!(content.starts_with(text), "partial arguments are a prefix of the final ones");
+            assert!(text.len() >= shown, "partial arguments only grow");
+            shown = text.len();
+        }
+    }
+    assert_eq!(deltas, arguments);
+    assert!(shown > content.len() / 2, "partial arguments kept up with the stream ({shown})");
+    let call = result.tool_calls().next().unwrap();
+    assert_eq!(serde_json::Value::Object(call.arguments.clone()), json!({"text": content}));
+    assert_eq!(call.arguments_error, None);
+}

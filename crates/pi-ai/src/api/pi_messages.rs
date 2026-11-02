@@ -27,8 +27,8 @@ use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEv
 use crate::utils::headers::{headers_to_record, provider_headers_to_record, to_provider_headers};
 use crate::utils::http::client_for;
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::parse_streaming_json_object;
 use crate::utils::provider_env::get_provider_env_value;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 
 /// Error for a non-2xx pi-messages response.
 #[derive(Debug, Clone)]
@@ -132,7 +132,7 @@ fn append_rewrite_diagnostic(message: &mut AssistantMessage, rewrite: Option<&Va
 /// Converts serialized pi-messages events into assistant message events.
 struct EventConverter {
     partial: AssistantMessage,
-    tool_json: HashMap<usize, String>,
+    tool_json: HashMap<usize, ToolCallArgumentsStream>,
 }
 
 fn index_of(event: &Value) -> usize {
@@ -296,7 +296,7 @@ impl EventConverter {
                         ..Default::default()
                     }),
                 );
-                self.tool_json.insert(index, String::new());
+                self.tool_json.insert(index, ToolCallArgumentsStream::new());
                 Some(AssistantMessageEvent::ToolCallStart {
                     content_index: index,
                     partial: self.partial.clone(),
@@ -304,10 +304,10 @@ impl EventConverter {
             }
             "toolcall_delta" => {
                 let delta = str_field(event, "delta");
-                let json = self.tool_json.entry(index).or_default();
-                json.push_str(&delta);
-                let arguments = parse_streaming_json_object(Some(json));
-                if let Some(AssistantContent::ToolCall(block)) = self.partial.content.get_mut(index)
+                // Take the block mutably only when the partial arguments changed.
+                if let Some(arguments) = self.tool_json.entry(index).or_default().append(&delta)
+                    && let Some(AssistantContent::ToolCall(block)) =
+                        self.partial.content.get_mut(index)
                 {
                     block.arguments = arguments;
                 }
