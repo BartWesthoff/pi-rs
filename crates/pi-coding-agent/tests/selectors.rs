@@ -326,6 +326,66 @@ async fn wait_for_catalog_refresh(selector: &ModelSelectorComponent) -> Duration
     }
 }
 
+// suite/regressions/6999-models-json-hot-reload.test.ts
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_selector_reloads_models_json_when_opened() {
+    use pi_coding_agent::core::auth_storage::AuthStorage;
+    use pi_coding_agent::core::model_runtime::{CreateModelRuntimeOptions, ModelRuntime};
+    use pi_coding_agent::core::models_store::InMemoryCodingAgentModelsStore;
+
+    fn models_json(provider: &str, model: &str) -> String {
+        json!({"providers": {provider: {
+            "baseUrl": "https://example.test/v1", "api": "openai-completions", "apiKey": "test-key",
+            "models": [{"id": model}]
+        }}})
+        .to_string()
+    }
+
+    let _g = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let models_path = dir.path().join("models.json");
+    std::fs::write(&models_path, models_json("old-provider", "old-model")).unwrap();
+    let runtime = ModelRuntime::create(Some(&CreateModelRuntimeOptions {
+        credentials: Some(AuthStorage::in_memory(None)),
+        models_path: Some(models_path.to_string_lossy().into_owned()),
+        models_store: Some(Arc::new(InMemoryCodingAgentModelsStore::new())),
+        allow_model_network: Some(false),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let old = runtime.get_model("old-provider", "old-model").expect("old model loads at startup");
+
+    std::fs::write(&models_path, models_json("new-provider", "new-model")).unwrap();
+    // Opening `/model` with the removed model still current must not keep it selectable.
+    let selector = ModelSelectorComponent::new(fake_tui(), Some(old), runtime.clone(), &[], Arc::new(|_| {}), Arc::new(|| {}), None, None, None);
+    wait_for_catalog_refresh(&selector).await;
+
+    let rendered = render_plain(&selector, 120);
+    assert!(rendered.contains("new-model [new-provider]"), "{rendered}");
+    assert!(!rendered.contains("old-model [old-provider]"), "{rendered}");
+    assert_eq!(selected_model_id(&rendered).as_deref(), Some("new-model"), "{rendered}");
+    assert!(runtime.get_model("old-provider", "old-model").is_none());
+
+    // Adding the provider back makes it appear on the next open.
+    std::fs::write(
+        &models_path,
+        json!({"providers": {
+            "new-provider": {"baseUrl": "https://example.test/v1", "api": "openai-completions", "apiKey": "test-key", "models": [{"id": "new-model"}]},
+            "old-provider": {"baseUrl": "https://example.test/v1", "api": "openai-completions", "apiKey": "test-key", "models": [{"id": "old-model"}]}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    selector.dispose();
+    let selector = ModelSelectorComponent::new(fake_tui(), None, runtime.clone(), &[], Arc::new(|_| {}), Arc::new(|| {}), None, None, None);
+    wait_for_catalog_refresh(&selector).await;
+    let rendered = render_plain(&selector, 120);
+    assert!(rendered.contains("new-model [new-provider]"), "{rendered}");
+    assert!(rendered.contains("old-model [old-provider]"), "{rendered}");
+    selector.dispose();
+}
+
 // suite/regressions/7209-model-selector-filter-resets-selection.test.ts
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_selector_filter_moves_selection_to_the_first_row_in_the_all_tab() {
