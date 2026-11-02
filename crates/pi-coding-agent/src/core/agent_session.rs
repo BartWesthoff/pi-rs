@@ -2855,11 +2855,18 @@ impl AgentSession {
     }
 
     /// Set the agent's tools for the given active tool names and return them.
+    ///
+    /// The active tools are a set: tools that stay active keep their current order and newly
+    /// active ones are appended, so reordering the same names does not change the prompt (#11495).
     fn apply_tool_loadout(&self, tool_names: &[String]) -> Vec<AgentToolRef> {
+        let requested: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
+        let kept: Vec<String> =
+            self.get_active_tool_names().into_iter().filter(|name| requested.contains(name.as_str())).collect();
         let mut seen = HashSet::new();
         let registry = self.state.lock().tool_registry.clone();
-        let tools: Vec<AgentToolRef> = tool_names
+        let tools: Vec<AgentToolRef> = kept
             .iter()
+            .chain(tool_names)
             .filter(|name| seen.insert((*name).clone()))
             .filter_map(|name| {
                 let tool = registry.get(name)?;

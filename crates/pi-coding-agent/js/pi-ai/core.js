@@ -693,6 +693,7 @@ const OVERFLOW_PATTERNS = [
 	/input is too long for requested model/i,
 	/exceeds the context window/i,
 	/exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))/i,
+	/context window exceeded/i,
 	/input token count.*exceeds the maximum/i,
 	/maximum prompt length is \d+/i,
 	/reduce the length of the messages/i,
@@ -770,6 +771,7 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	"billing",
 	"subscription_sharing_usage_limit_exceeded",
 	"subscription_sharing_workplace_individual_usage_limit_exceeded",
+	'"code"\\s*:\\s*"?1308(?![0-9])',
 ]);
 
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
