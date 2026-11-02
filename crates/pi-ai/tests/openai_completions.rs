@@ -667,6 +667,95 @@ async fn user_abort_mid_stream_reports_aborted() {
     );
 }
 
+/// Esc while a local server is still prefilling: the response head has not arrived yet.
+#[tokio::test]
+async fn user_abort_before_the_response_head_reports_aborted_without_retrying() {
+    let body = openai_sse_body(&[llama_chunk(json!({"content": "late"}), None), llama_chunk(json!({}), Some("stop"))]);
+    let server = mock_http::MockServer::sequence(vec![mock_http::Response::sse(&body).with_delay(5_000)]).await;
+    let signal = tokio_util::sync::CancellationToken::new();
+    let options = StreamOptions {
+        signal: Some(signal.clone()),
+        max_retries: Some(3),
+        ..local_options()
+    };
+    let started = Instant::now();
+    let canceller = {
+        let signal = signal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            signal.cancel();
+        })
+    };
+    let (events, result) = openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options)
+        .collect_all()
+        .await;
+    canceller.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3), "abort did not interrupt the wait for the head: {:?}", started.elapsed());
+    assert_eq!(result.stop_reason, StopReason::Aborted);
+    assert_eq!(result.error_message.as_deref(), Some("Request aborted"));
+    assert!(result.content.is_empty(), "{:?}", result.content);
+    let types: Vec<&str> = events.iter().map(|e| e.type_name()).collect();
+    // TS 1.4.0 emits no `start` either: the request never produced a response.
+    assert_eq!(types, ["error"]);
+    assert_eq!(server.requests().len(), 1, "an aborted request is not retried");
+}
+
+/// Esc while the model is streaming a tool call's arguments: the partial call stays in the aborted
+/// message with its parse error, exactly like TS 1.4.0 on the same stream.
+#[tokio::test]
+async fn user_abort_mid_tool_call_arguments_reports_aborted() {
+    let body = openai_sse_body(&[
+        llama_chunk(json!({"role": "assistant", "content": null}), None),
+        llama_chunk(
+            json!({"tool_calls": [{"index": 0, "id": "call_a", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":"}}]}),
+            None,
+        ),
+        llama_chunk(json!({"tool_calls": [{"index": 0, "function": {"arguments": "\"rm -rf"}}]}), None),
+        llama_chunk(json!({"tool_calls": [{"index": 0, "function": {"arguments": " build\"}"}}]}), None),
+        llama_chunk(json!({}), Some("tool_calls")),
+    ]);
+    let frames: Vec<Vec<u8>> = body.split_inclusive("\n\n").map(|frame| frame.as_bytes().to_vec()).collect();
+    let server = mock_http::MockServer::sequence(vec![
+        mock_http::Response::chunked(200, "text/event-stream", frames).with_chunk_delay(300),
+    ])
+    .await;
+    let signal = tokio_util::sync::CancellationToken::new();
+    let options = StreamOptions { signal: Some(signal.clone()), ..local_options() };
+    let mut stream = openai_completions::stream(&llama_cpp_model(&server.url), &llama_context(), options);
+    let mut types = Vec::new();
+    let mut final_message = None;
+    while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        if matches!(event, AssistantMessageEvent::ToolCallDelta { .. }) {
+            signal.cancel();
+        }
+        types.push(event.type_name());
+        if let AssistantMessageEvent::Error { reason, error } = event {
+            assert_eq!(reason, StopReason::Aborted);
+            final_message = Some(error);
+        }
+    }
+    assert_eq!(types, ["start", "toolcall_start", "toolcall_delta", "toolcall_end", "error"]);
+    let message = final_message.expect("error event");
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(message.error_message.as_deref(), Some("Request was aborted"));
+    let calls: Vec<&ToolCall> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            AssistantContent::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "bash");
+    assert!(calls[0].arguments.is_empty(), "partial argument must not look complete: {:?}", calls[0].arguments);
+    assert_eq!(
+        calls[0].arguments_error.as_deref(),
+        Some("Unexpected end of JSON input\n\nReceived arguments:\n{\"command\":")
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
 #[tokio::test]
 async fn malformed_tool_call_json_finishes_with_an_arguments_error() {
     let raw = "{\"path\": \"hello.txt\", ";
