@@ -61,3 +61,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "pi"
 path = "src/main.rs"
+
+[[bench]]
+name = "stream_local"
+harness = false
