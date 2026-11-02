@@ -28,7 +28,9 @@ type TransformFn<T> = Arc<dyn Fn(&mut T) + Send + Sync>;
 type CoalesceFn<T> = Arc<dyn Fn(&mut T, T) -> Option<T> + Send + Sync>;
 
 /// Queued events after which a stream with a coalescing rule merges new events into the last one.
-pub const COALESCE_AFTER: usize = 1024;
+/// Each queued partial message can hold its own copy of the content, so this bounds the memory a
+/// lagging consumer holds to about this many copies.
+pub const COALESCE_AFTER: usize = 256;
 
 struct QueueState<T> {
     items: VecDeque<T>,
