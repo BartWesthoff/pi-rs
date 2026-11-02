@@ -154,8 +154,42 @@ pub fn translate(source: &str, flags: &str) -> String {
 /// A compiled JavaScript regular expression.
 pub struct JsRegex {
     re: Regex,
+    /// For a pattern that can only match at the start of the input: the same pattern followed by an
+    /// empty alternative in a last capture group (`(?:re)|()`), and that group's index.
+    ///
+    /// fancy-regex searches a pattern it runs on its backtracking VM by retrying it at every start
+    /// position, even when the pattern begins with `^`, so a failing `exec` costs a pass over the
+    /// whole input. The lexer runs its block rules on the rest of the source for every block, which
+    /// made lexing quadratic. With the empty alternative a failing match at the start ends the
+    /// search there.
+    anchored: Option<(Regex, usize)>,
     /// The original JavaScript source.
     pub source: String,
+}
+
+/// Whether a JavaScript regex can only match at the start of the input: it is not multiline and
+/// every top-level alternative begins with `^`.
+fn is_start_anchored(source: &str, flags: &str) -> bool {
+    if flags.contains('m') || !source.starts_with('^') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut in_class = false;
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            '|' if !in_class && depth == 0 && chars.peek() != Some(&'^') => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 impl std::fmt::Debug for JsRegex {
@@ -168,16 +202,32 @@ impl JsRegex {
     /// Compile a JavaScript regex source. Panics on invalid patterns (grammar is static).
     pub fn new(source: &str, flags: &str) -> Self {
         let translated = translate(source, flags);
-        let re = fancy_regex::RegexBuilder::new(&translated)
-            .backtrack_limit(10_000_000)
-            .build()
-            .unwrap_or_else(|e| panic!("invalid regex /{source}/ -> {translated}: {e}"));
-        Self { re, source: source.to_string() }
+        let build = |pattern: &str| {
+            fancy_regex::RegexBuilder::new(pattern)
+                .backtrack_limit(10_000_000)
+                .build()
+                .unwrap_or_else(|e| panic!("invalid regex /{source}/ -> {pattern}: {e}"))
+        };
+        let re = build(&translated);
+        let anchored = is_start_anchored(source, flags)
+            .then(|| (build(&format!("(?:{translated})|()")), re.captures_len()));
+        Self {
+            re,
+            anchored,
+            source: source.to_string(),
+        }
     }
 
     /// `regex.exec(s)` (from the start).
     pub fn exec<'t>(&self, s: &'t str) -> Option<Captures<'t>> {
-        self.re.captures(s).ok().flatten()
+        match &self.anchored {
+            Some((anchored, empty_group)) => anchored
+                .captures(s)
+                .ok()
+                .flatten()
+                .filter(|c| c.get(*empty_group).is_none()),
+            None => self.re.captures(s).ok().flatten(),
+        }
     }
 
     /// Search starting at byte `pos` (like `lastIndex` with the `g` flag).
@@ -190,7 +240,10 @@ impl JsRegex {
 
     /// `regex.test(s)`.
     pub fn test(&self, s: &str) -> bool {
-        self.re.is_match(s).unwrap_or(false)
+        match &self.anchored {
+            Some(_) => self.exec(s).is_some(),
+            None => self.re.is_match(s).unwrap_or(false),
+        }
     }
 
     /// `s.search(regex)`.
@@ -302,6 +355,53 @@ mod tests {
         assert!(re.test("~&"));
         let re = JsRegex::new(r"[\u{1100}-\u{11ff}　]", "u");
         assert!(re.test("\u{3000}"));
+    }
+
+    #[test]
+    fn start_anchored_patterns_match_like_the_plain_pattern() {
+        assert!(is_start_anchored(r"^ {0,3}(`{3,}|~{3,})", ""));
+        assert!(is_start_anchored(r"^(?:a|b)c", ""));
+        assert!(is_start_anchored(r"^[|]x", ""));
+        assert!(!is_start_anchored(r"^a|b", ""));
+        assert!(is_start_anchored(r"^a|^b", ""));
+        assert!(!is_start_anchored(r"^a|^b|c", ""));
+        assert!(!is_start_anchored(r"^a", "m"));
+        assert!(!is_start_anchored(r"a^", ""));
+        let cases = [
+            (r"^(a+)(?=b)", ["aab", "xaab", "b", ""]),
+            (r"^(?:(x)|(y))\1?z", ["xxz", "yz", "zxz", "q"]),
+            (
+                r"^(?!\s)([^\n]+)(?:\n|$)",
+                ["line\nnext", " lead", "\n", "end"],
+            ),
+            (
+                r"^(?:\*+(?:((?!\*)[.,])|([^\s*]))?)|^_+(?:((?!_)[.,])|([^\s_]))?",
+                ["**a", "__,", "x**", "_"],
+            ),
+        ];
+        for (source, inputs) in cases {
+            let re = JsRegex::new(source, "");
+            assert!(re.anchored.is_some(), "{source}");
+            for input in inputs {
+                let plain = re.re.captures(input).ok().flatten();
+                let anchored = re.exec(input);
+                assert_eq!(
+                    anchored.is_some(),
+                    plain.is_some(),
+                    "/{source}/ on {input:?}"
+                );
+                assert_eq!(re.test(input), plain.is_some(), "/{source}/ on {input:?}");
+                if let (Some(plain), Some(anchored)) = (plain, anchored) {
+                    for i in 0..plain.len() {
+                        assert_eq!(
+                            plain.get(i).map(|m| m.range()),
+                            anchored.get(i).map(|m| m.range()),
+                            "/{source}/ group {i}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
