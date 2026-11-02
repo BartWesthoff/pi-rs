@@ -22,8 +22,9 @@ use crate::types::{
 };
 use crate::utils::event_stream::AssistantMessageEventSender;
 use crate::utils::hash::short_hash;
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::json_parse::parse_tool_call_arguments;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{
     get_system_message_text, get_system_message_text_is_empty, render_system_message_update,
     render_system_message_update_is_empty,
@@ -637,9 +638,9 @@ struct Slot {
 }
 
 /// Streaming scratch state of an unfinished tool call (the TS `partialJson`/`customInput` fields).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct ToolScratch {
-    partial_json: Option<String>,
+    partial_json: Option<ToolCallArgumentsStream>,
     custom_input: Option<(String, GrammarToolInputJsonBuffer)>,
 }
 
@@ -767,9 +768,11 @@ impl<'a> ResponsesStreamProcessor<'a> {
                 self.scratch.insert(
                     slot.content_index,
                     ToolScratch {
-                        partial_json: Some(
-                            str_of(item, "arguments").unwrap_or_default().to_string(),
-                        ),
+                        partial_json: Some({
+                            let mut arguments = ToolCallArgumentsStream::new();
+                            arguments.append(str_of(item, "arguments").unwrap_or_default());
+                            arguments
+                        }),
                         custom_input: None,
                     },
                 );
@@ -1069,10 +1072,10 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     return Ok(());
                 };
                 let delta = js_display(event.get("delta"));
-                partial.push_str(&delta);
-                let arguments = parse_streaming_json_object(Some(partial));
-                if let Some(AssistantContent::ToolCall(call)) =
-                    output.content.get_mut(slot.content_index)
+                // Take the block mutably only when the partial arguments changed.
+                if let Some(arguments) = partial.append(&delta)
+                    && let Some(AssistantContent::ToolCall(call)) =
+                        output.content.get_mut(slot.content_index)
                 {
                     call.arguments = arguments;
                 }
@@ -1089,19 +1092,16 @@ impl<'a> ResponsesStreamProcessor<'a> {
                 else {
                     return Ok(());
                 };
-                let previous = std::mem::take(partial);
                 let arguments_text = js_display(event.get("arguments"));
-                *partial = arguments_text.clone();
-                let arguments = parse_streaming_json_object(Some(&arguments_text));
-                if let Some(AssistantContent::ToolCall(call)) =
-                    output.content.get_mut(slot.content_index)
+                let (delta, arguments) = partial.replace(&arguments_text);
+                if let Some(arguments) = arguments
+                    && let Some(AssistantContent::ToolCall(call)) =
+                        output.content.get_mut(slot.content_index)
                 {
                     call.arguments = arguments;
                 }
-                if let Some(delta) = arguments_text.strip_prefix(previous.as_str())
-                    && !delta.is_empty()
-                {
-                    Self::push_tool_call_delta(output, sender, slot, Some(delta.to_string()));
+                if let Some(delta) = delta.filter(|delta| !delta.is_empty()) {
+                    Self::push_tool_call_delta(output, sender, slot, Some(delta));
                 }
             }
             "response.custom_tool_call_input.delta" => {
@@ -1222,15 +1222,14 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         let Some(partial) = self
                             .scratch
                             .get(&slot.content_index)
-                            .and_then(|s| s.partial_json.clone())
+                            .and_then(|s| s.partial_json.as_ref())
                         else {
                             return Ok(());
                         };
-                        let arguments_text = str_of(item, "arguments")
-                            .filter(|a| !a.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or(partial);
-                        let parsed = parse_tool_call_arguments(Some(&arguments_text));
+                        let parsed = match str_of(item, "arguments").filter(|a| !a.is_empty()) {
+                            Some(arguments_text) => parse_tool_call_arguments(Some(arguments_text)),
+                            None => partial.finish(),
+                        };
                         let tool_call = if let Some(AssistantContent::ToolCall(call)) =
                             output.content.get_mut(slot.content_index)
                         {

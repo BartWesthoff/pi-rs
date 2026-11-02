@@ -31,8 +31,8 @@ use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEv
 use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{
     get_system_message_text, get_system_message_text_is_empty, render_system_message_update,
     render_system_message_update_is_empty,
@@ -493,23 +493,39 @@ impl MistralEventReader {
         }
     }
 
+    /// Queue the complete events in the buffer; returns true at `[DONE]`. Events are read in place
+    /// and the consumed prefix is dropped once.
+    fn take_events(
+        &mut self,
+        queue: &mut std::collections::VecDeque<Value>,
+    ) -> anyhow::Result<bool> {
+        let mut start = 0;
+        let mut done = false;
+        while let Some((offset, length)) = find_boundary(&self.buffer[start..]) {
+            let event = parse_event(&self.buffer[start..start + offset]);
+            start += offset + length;
+            match event? {
+                Some(MistralEvent::Done) => {
+                    done = true;
+                    break;
+                }
+                Some(MistralEvent::Data(event)) => queue.push_back(event),
+                None => {}
+            }
+        }
+        self.buffer.drain(..start);
+        Ok(done)
+    }
+
     /// The next event; `Ok(None)` at the end of the stream or after `[DONE]`.
     async fn next(&mut self, queue: &mut std::collections::VecDeque<Value>) -> anyhow::Result<bool> {
         loop {
             if self.finished {
                 return Ok(false);
             }
-            while let Some((index, length)) = find_boundary(&self.buffer) {
-                let raw = self.buffer[..index].to_string();
-                self.buffer = self.buffer[index + length..].to_string();
-                match parse_event(&raw)? {
-                    Some(MistralEvent::Done) => {
-                        self.finished = true;
-                        return Ok(!queue.is_empty());
-                    }
-                    Some(MistralEvent::Data(event)) => queue.push_back(event),
-                    None => {}
-                }
+            if self.take_events(queue)? {
+                self.finished = true;
+                return Ok(!queue.is_empty());
             }
             if !queue.is_empty() {
                 return Ok(true);
@@ -535,17 +551,9 @@ impl MistralEventReader {
                         let rest = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
                         self.buffer.push_str(&rest);
                     }
-                    while let Some((index, length)) = find_boundary(&self.buffer) {
-                        let raw = self.buffer[..index].to_string();
-                        self.buffer = self.buffer[index + length..].to_string();
-                        match parse_event(&raw)? {
-                            Some(MistralEvent::Done) => {
-                                self.finished = true;
-                                return Ok(!queue.is_empty());
-                            }
-                            Some(MistralEvent::Data(event)) => queue.push_back(event),
-                            None => {}
-                        }
+                    if self.take_events(queue)? {
+                        self.finished = true;
+                        return Ok(!queue.is_empty());
                     }
                     if !self.buffer.trim().is_empty() {
                         let raw = std::mem::take(&mut self.buffer);
@@ -650,7 +658,7 @@ struct StreamState {
     current: Option<usize>,
     /// Tool call blocks by stream key (`index` or id) with their raw argument text.
     tool_blocks: IndexMap<String, usize>,
-    partial_args: HashMap<usize, String>,
+    partial_args: HashMap<usize, ToolCallArgumentsStream>,
 }
 
 fn finish_current(state: &mut StreamState, output: &AssistantMessage, sender: &AssistantMessageEventSender) {
@@ -780,7 +788,7 @@ fn consume_chunk(chunk: &Value, model: &Model, output: &mut AssistantMessage, se
                 output.content.push(AssistantContent::ToolCall(ToolCall { id: call_id, name: name.to_string(), ..Default::default() }));
                 let position = output.content.len() - 1;
                 state.tool_blocks.insert(key, position);
-                state.partial_args.insert(position, String::new());
+                state.partial_args.insert(position, ToolCallArgumentsStream::new());
                 sender.push(AssistantMessageEvent::ToolCallStart { content_index: position, partial: output.clone() });
                 position
             }
@@ -790,10 +798,10 @@ fn consume_chunk(chunk: &Value, model: &Model, output: &mut AssistantMessage, se
             Some(Value::Null) | None => "{}".to_string(),
             Some(other) => other.to_string(),
         };
-        let partial = state.partial_args.entry(position).or_default();
-        partial.push_str(&args_delta);
-        let parsed = parse_streaming_json_object(Some(partial));
-        if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
+        // Take the block mutably only when the partial arguments changed.
+        if let Some(parsed) = state.partial_args.entry(position).or_default().append(&args_delta)
+            && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position)
+        {
             block.arguments = parsed;
         }
         sender.push(AssistantMessageEvent::ToolCallDelta { content_index: position, delta: args_delta, partial: output.clone() });
@@ -837,8 +845,7 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
         }
         finish_current(&mut state, &output, &sender);
         for position in state.tool_blocks.values().copied().collect::<Vec<_>>() {
-            let partial = state.partial_args.remove(&position).unwrap_or_default();
-            let parsed = parse_tool_call_arguments(Some(&partial));
+            let parsed = state.partial_args.remove(&position).unwrap_or_default().finish();
             if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
                 block.arguments = parsed.arguments;
                 block.arguments_error = parsed.arguments_error;

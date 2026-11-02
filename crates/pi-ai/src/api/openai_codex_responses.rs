@@ -883,9 +883,11 @@ impl CodexSseDecoder {
             self.buffer.push_str("\n\n");
         }
         let mut events = Vec::new();
-        while let Some(idx) = self.buffer.find("\n\n") {
-            let chunk = self.buffer[..idx].to_string();
-            self.buffer = self.buffer[idx + 2..].to_string();
+        // Frames are read in place and the consumed prefix is dropped once per chunk.
+        let mut start = 0;
+        while let Some(offset) = self.buffer[start..].find("\n\n") {
+            let chunk = &self.buffer[start..start + offset];
+            start += offset + 2;
             let data_lines: Vec<&str> = chunk
                 .split('\n')
                 .filter(|l| l.starts_with("data:"))
@@ -910,6 +912,7 @@ impl CodexSseDecoder {
                 }
             }
         }
+        self.buffer.drain(..start);
         Ok(events)
     }
 }

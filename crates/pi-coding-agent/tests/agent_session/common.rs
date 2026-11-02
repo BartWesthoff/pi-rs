@@ -358,7 +358,7 @@ pub fn seed_compactable_session(harness: &Harness) {
         .append_message(user_blocks("message to compact", now - 1000))
         .unwrap();
     let mut assistant = create_assistant(harness, StopReason::Stop, None, 100, now - 500);
-    assistant.content = vec![faux_text("assistant response to compact")];
+    assistant.content = vec![faux_text("assistant response to compact")].into();
     harness
         .session_manager
         .append_message(pi_agent::types::AgentMessage::Assistant(assistant))

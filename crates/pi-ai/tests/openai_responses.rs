@@ -116,7 +116,7 @@ fn empty_tool_results_use_placeholder() {
                 name: "bash".into(),
                 arguments: json!({ "command": "true" }).as_object().cloned().unwrap(),
                 ..Default::default()
-            })],
+            })].into(),
             api: model.api.clone(),
             provider: model.provider.clone(),
             model: model.id.clone(),
@@ -160,7 +160,7 @@ fn foreign_copilot_item_ids_are_hashed() {
                 .cloned()
                 .unwrap(),
             ..Default::default()
-        })],
+        })].into(),
         api: "openai-responses".into(),
         provider: "github-copilot".into(),
         model: "gpt-5.5".into(),
@@ -196,7 +196,7 @@ fn unique_fallback_message_ids() {
         content: vec![
             AssistantContent::Text(TextContent::new("first answer")),
             AssistantContent::Text(TextContent::new("visible answer")),
-        ],
+        ].into(),
         api: "anthropic-messages".into(),
         provider: "anthropic".into(),
         model: "claude-opus-4-8".into(),

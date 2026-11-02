@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use futures::StreamExt;
-use pi_ai::utils::json_parse::parse_streaming_json_object;
+use pi_ai::ToolCallArgumentsStream;
 use pi_ai::utils::now_ms;
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantMessageEventSender,
@@ -207,7 +207,7 @@ pub fn stream_proxy(
         // Initialize the partial message that we'll build up from events.
         let mut state = ProxyState {
             partial: AssistantMessage {
-                content: Vec::new(),
+                content: Vec::new().into(),
                 api: model.api.clone(),
                 provider: model.provider.clone(),
                 model: model.id.clone(),
@@ -246,7 +246,7 @@ pub fn stream_proxy(
 struct ProxyState {
     partial: AssistantMessage,
     /// Accumulated tool-call argument JSON per content index.
-    partial_json: HashMap<usize, String>,
+    partial_json: HashMap<usize, ToolCallArgumentsStream>,
 }
 
 async fn run_proxy_request(
@@ -511,7 +511,9 @@ fn process_proxy_event(
                     ..Default::default()
                 }),
             );
-            state.partial_json.insert(content_index, String::new());
+            state
+                .partial_json
+                .insert(content_index, ToolCallArgumentsStream::new());
             AssistantMessageEvent::ToolCallStart {
                 content_index,
                 partial: partial.clone(),
@@ -522,13 +524,22 @@ fn process_proxy_event(
             content_index,
             delta,
         } => {
-            match partial.content.get_mut(content_index) {
-                Some(AssistantContent::ToolCall(content)) => {
-                    let json = state.partial_json.entry(content_index).or_default();
-                    json.push_str(&delta);
-                    content.arguments = parse_streaming_json_object(Some(json));
-                }
-                _ => return Err("Received toolcall_delta for non-toolCall content".to_string()),
+            if !matches!(
+                partial.content.get(content_index),
+                Some(AssistantContent::ToolCall(_))
+            ) {
+                return Err("Received toolcall_delta for non-toolCall content".to_string());
+            }
+            // Take the block mutably only when the partial arguments changed.
+            if let Some(arguments) = state
+                .partial_json
+                .entry(content_index)
+                .or_default()
+                .append(&delta)
+                && let Some(AssistantContent::ToolCall(content)) =
+                    partial.content.get_mut(content_index)
+            {
+                content.arguments = arguments;
             }
             AssistantMessageEvent::ToolCallDelta {
                 content_index,

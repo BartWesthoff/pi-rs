@@ -40,7 +40,7 @@ use crate::utils::error_body::{MAX_PROVIDER_ERROR_BODY_CHARS, truncate_error_tex
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record};
 use crate::utils::identity::{ClientIdentity, UserAgentMode, UserAgentNamed, get_client_version};
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 use crate::utils::text::{get_system_message_text, get_system_message_text_is_empty};
@@ -1033,7 +1033,7 @@ impl ConverseEventReader {
 struct BlockState {
     /// Bedrock `contentBlockIndex` per output block (`None` once stopped).
     index: Vec<Option<i64>>,
-    partial_json: std::collections::HashMap<usize, String>,
+    partial_json: std::collections::HashMap<usize, ToolCallArgumentsStream>,
     redacted_chunks: std::collections::HashMap<usize, Vec<u8>>,
 }
 
@@ -1083,7 +1083,7 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
                 ..Default::default()
             }));
             state.index.push(index);
-            state.partial_json.insert(output.content.len() - 1, String::new());
+            state.partial_json.insert(output.content.len() - 1, ToolCallArgumentsStream::new());
             sender.push(AssistantMessageEvent::ToolCallStart { content_index: output.content.len() - 1, partial: output.clone() });
         }
     } else if let Some(event) = item.get("contentBlockDelta") {
@@ -1105,10 +1105,10 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
         } else if let (Some(tool_use), Some(position)) = (delta.get("toolUse"), position) {
             if matches!(output.content.get(position), Some(AssistantContent::ToolCall(_))) {
                 let input = tool_use.get("input").and_then(Value::as_str).unwrap_or_default().to_string();
-                let partial = state.partial_json.entry(position).or_default();
-                partial.push_str(&input);
-                let parsed = parse_streaming_json_object(Some(partial));
-                if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
+                // Take the block mutably only when the partial arguments changed.
+                if let Some(parsed) = state.partial_json.entry(position).or_default().append(&input)
+                    && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position)
+                {
                     block.arguments = parsed;
                 }
                 sender.push(AssistantMessageEvent::ToolCallDelta { content_index: position, delta: input, partial: output.clone() });
@@ -1183,8 +1183,7 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
                 sender.push(AssistantMessageEvent::ThinkingEnd { content_index: position, content, partial: output.clone() });
             }
             Some(AssistantContent::ToolCall(block)) => {
-                let partial = state.partial_json.remove(&position).unwrap_or_default();
-                let parsed = parse_tool_call_arguments(Some(&partial));
+                let parsed = state.partial_json.remove(&position).unwrap_or_default().finish();
                 block.arguments = parsed.arguments;
                 block.arguments_error = parsed.arguments_error;
                 let tool_call = block.clone();

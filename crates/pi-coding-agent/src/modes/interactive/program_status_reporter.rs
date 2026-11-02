@@ -285,7 +285,7 @@ mod tests {
     fn assistant_end(stop_reason: StopReason, error_message: Option<&str>) -> AgentSessionEvent {
         AgentSessionEvent::MessageEnd {
             message: AgentMessage::Assistant(AssistantMessage {
-                content: vec![AssistantContent::Text(TextContent::new("secret assistant output"))],
+                content: vec![AssistantContent::Text(TextContent::new("secret assistant output"))].into(),
                 stop_reason,
                 error_message: error_message.map(str::to_string),
                 ..Default::default()

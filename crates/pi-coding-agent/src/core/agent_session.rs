@@ -2473,12 +2473,16 @@ impl AgentSession {
                 message,
                 assistant_message_event,
             } => {
-                let _ = runner
-                    .emit(ExtensionEvent::MessageUpdate(MessageUpdateEvent {
-                        message: message.clone(),
-                        assistant_message_event: (*assistant_message_event).clone(),
-                    }))
-                    .await;
+                // One update per streamed delta: build the extension event only when it has a
+                // listener.
+                if runner.has_handlers("message_update") {
+                    let _ = runner
+                        .emit(ExtensionEvent::MessageUpdate(MessageUpdateEvent {
+                            message: message.clone(),
+                            assistant_message_event: (*assistant_message_event).clone(),
+                        }))
+                        .await;
+                }
                 AgentEvent::MessageUpdate {
                     message,
                     assistant_message_event,

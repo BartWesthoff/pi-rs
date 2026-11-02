@@ -158,7 +158,7 @@ pub fn transform_messages(
                     }
                 }
                 let mut assistant = assistant;
-                assistant.content = content;
+                assistant.content = content.into();
                 Message::Assistant(assistant)
             }
         })

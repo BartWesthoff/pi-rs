@@ -31,7 +31,7 @@ pub fn create_model() -> Model {
 
 pub fn assistant(content: Vec<AssistantContent>, stop_reason: StopReason) -> AssistantMessage {
     AssistantMessage {
-        content,
+        content: content.into(),
         api: "openai-responses".into(),
         provider: "openai".into(),
         model: "mock".into(),
