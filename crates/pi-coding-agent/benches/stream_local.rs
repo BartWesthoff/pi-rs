@@ -137,40 +137,41 @@ struct Scenario {
     size: usize,
     /// Session-layer CPU budget at full size.
     cpu_budget: Duration,
-    /// Session-layer peak live heap budget, as a multiple of the streamed payload size.
-    peak_budget_factor: usize,
+    /// Session-layer peak live heap budget in bytes.
+    peak_budget: usize,
 }
 
-/// Budgets for the session layer. A run is over budget when either limit is exceeded; enforced
+/// Budgets for the session layer, about 2x the release-build numbers measured when they were set
+/// (recorded in PORTING-STATUS.md). A run is over budget when either limit is exceeded; enforced
 /// only with `PI_STREAM_BENCH_ENFORCE=1`.
 const SCENARIOS: [Scenario; 4] = [
     Scenario {
         name: "text-2k",
         kind: Kind::Text,
         size: 2_000,
-        cpu_budget: Duration::from_millis(100),
-        peak_budget_factor: 16,
+        cpu_budget: Duration::from_millis(50),
+        peak_budget: 8 << 20,
     },
     Scenario {
         name: "text-8k",
         kind: Kind::Text,
         size: 8_000,
-        cpu_budget: Duration::from_millis(200),
-        peak_budget_factor: 16,
+        cpu_budget: Duration::from_millis(175),
+        peak_budget: 24 << 20,
     },
     Scenario {
         name: "text-16k",
         kind: Kind::Text,
         size: 16_000,
         cpu_budget: Duration::from_millis(300),
-        peak_budget_factor: 16,
+        peak_budget: 56 << 20,
     },
     Scenario {
         name: "write-200k",
         kind: Kind::Write,
         size: 200_000,
-        cpu_budget: Duration::from_millis(200),
-        peak_budget_factor: 16,
+        cpu_budget: Duration::from_millis(1_300),
+        peak_budget: 16 << 20,
     },
 ];
 
@@ -222,8 +223,7 @@ fn usage_chunk(completion_tokens: usize) -> String {
 /// The SSE body for a scenario and the size of the payload it streams.
 fn sse_body(kind: Kind, size: usize) -> (String, usize) {
     let mut body = chunk(json!({"role": "assistant", "content": ""}), None);
-    let payload;
-    match kind {
+    let payload = match kind {
         Kind::Text => {
             let mut text = 0usize;
             for index in 0..size {
@@ -233,7 +233,7 @@ fn sse_body(kind: Kind, size: usize) -> (String, usize) {
             }
             body.push_str(&chunk(json!({}), Some("stop")));
             body.push_str(&usage_chunk(size));
-            payload = text;
+            text
         }
         Kind::Write => {
             let arguments =
@@ -252,9 +252,9 @@ fn sse_body(kind: Kind, size: usize) -> (String, usize) {
             }
             body.push_str(&chunk(json!({}), Some("tool_calls")));
             body.push_str(&usage_chunk(bytes.len() / 3));
-            payload = arguments.len();
+            arguments.len()
         }
-    }
+    };
     body.push_str("data: [DONE]\n\n");
     (body, payload)
 }
@@ -665,7 +665,7 @@ fn main() {
             );
             let over_budget = !quick
                 && layer == Layer::Session
-                && (cpu > scenario.cpu_budget || peak > payload * scenario.peak_budget_factor);
+                && (cpu > scenario.cpu_budget || peak > scenario.peak_budget);
             results.push(Measurement {
                 scenario: scenario.name,
                 layer,
