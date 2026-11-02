@@ -6,7 +6,9 @@ use super::{arg, as_component, path_arg, reuse_container, reuse_text};
 use crate::core::extensions::types::{ToolRenderContext, ToolRenderResultOptions, ToolRenderers};
 use crate::core::tools::render_utils::{normalize_display_text, render_tool_path_ref, replace_tabs, str_ref};
 use crate::modes::interactive::components::keybinding_hints::key_hint;
-use crate::modes::interactive::theme::theme::{Theme, get_language_from_path, highlight_code};
+use crate::modes::interactive::theme::theme::{
+    CodeHighlighter, Theme, get_language_from_path, highlight_code,
+};
 use crate::modes::interactive::theme::theme_tokens::ThemeColor;
 use pi_agent::types::AgentToolResult;
 use pi_tui::components::text::Text;
@@ -26,7 +28,12 @@ struct WriteHighlightCache {
 /// `class WriteCallRenderComponent extends Text { cache?: WriteHighlightCache }`.
 pub struct WriteCallRenderComponent {
     text: Text,
+    /// Line by line highlighting of a call whose content is still streaming.
     cache: parking_lot::Mutex<Option<WriteHighlightCache>>,
+    /// A streamed call highlights its first lines on every delta, which stop changing once the file
+    /// is longer, and a complete call highlights the whole file on every update and expand toggle.
+    /// Either way the row reuses the last highlighting.
+    highlighter: CodeHighlighter,
 }
 
 impl WriteCallRenderComponent {
@@ -34,6 +41,7 @@ impl WriteCallRenderComponent {
         Self {
             text: Text::new("", 0, 0, None),
             cache: parking_lot::Mutex::new(None),
+            highlighter: CodeHighlighter::new(),
         }
     }
 
@@ -62,13 +70,13 @@ fn highlight_single_line(line: &str, lang: &str) -> String {
     highlight_code(line, Some(lang)).into_iter().next().unwrap_or_default()
 }
 
-fn refresh_write_highlight_prefix(cache: &mut WriteHighlightCache) {
+fn refresh_write_highlight_prefix(cache: &mut WriteHighlightCache, highlighter: &CodeHighlighter) {
     let prefix_count = WRITE_PARTIAL_FULL_HIGHLIGHT_LINES.min(cache.normalized_lines.len());
     if prefix_count == 0 {
         return;
     }
     let prefix_source = cache.normalized_lines[..prefix_count].join("\n");
-    let prefix_highlighted = highlight_code(&prefix_source, Some(&cache.lang));
+    let prefix_highlighted = highlighter.highlight(&prefix_source, Some(&cache.lang));
     for i in 0..prefix_count {
         let line = match prefix_highlighted.get(i) {
             Some(line) => line.clone(),
@@ -98,15 +106,16 @@ fn update_write_highlight_cache_incremental(
     cache: Option<WriteHighlightCache>,
     raw_path: Option<&str>,
     file_content: &str,
+    highlighter: &CodeHighlighter,
 ) -> Option<WriteHighlightCache> {
     let lang = raw_path.filter(|p| !p.is_empty()).and_then(get_language_from_path)?;
     let Some(mut cache) = cache else {
         return rebuild_write_highlight_cache_full(raw_path, file_content);
     };
-    if cache.lang != lang || cache.raw_path.as_deref() != raw_path {
-        return rebuild_write_highlight_cache_full(raw_path, file_content);
-    }
-    if !file_content.starts_with(&cache.raw_content) {
+    if cache.lang != lang
+        || cache.raw_path.as_deref() != raw_path
+        || !file_content.starts_with(&cache.raw_content)
+    {
         return rebuild_write_highlight_cache_full(raw_path, file_content);
     }
     if file_content.len() == cache.raw_content.len() {
@@ -115,7 +124,7 @@ fn update_write_highlight_cache_incremental(
 
     let delta_raw = &file_content[cache.raw_content.len()..];
     let delta_normalized = replace_tabs(&normalize_display_text(delta_raw));
-    cache.raw_content = file_content.to_string();
+    cache.raw_content.push_str(delta_raw);
     if cache.normalized_lines.is_empty() {
         cache.normalized_lines.push(String::new());
         cache.highlighted_lines.push(String::new());
@@ -134,16 +143,16 @@ fn update_write_highlight_cache_incremental(
         cache.normalized_lines.push(segment.to_string());
         cache.highlighted_lines.push(highlight_single_line(segment, &cache.lang));
     }
-    refresh_write_highlight_prefix(&mut cache);
+    refresh_write_highlight_prefix(&mut cache, highlighter);
     Some(cache)
 }
 
-fn trim_trailing_empty_lines(lines: Vec<String>) -> Vec<String> {
+fn trim_trailing_empty_lines(lines: &[String]) -> &[String] {
     let mut end = lines.len();
     while end > 0 && lines[end - 1].is_empty() {
         end -= 1;
     }
-    lines.into_iter().take(end).collect()
+    &lines[..end]
 }
 
 fn format_write_call(
@@ -151,6 +160,7 @@ fn format_write_call(
     options: ToolRenderResultOptions,
     theme: &Theme,
     cache: Option<&WriteHighlightCache>,
+    highlighter: &CodeHighlighter,
     cwd: &str,
 ) -> String {
     let raw_path = str_ref(path_arg(args));
@@ -167,12 +177,26 @@ fn format_write_call(
         }
         Some(file_content) if !file_content.is_empty() => {
             let lang = raw_path.as_deref().filter(|p| !p.is_empty()).and_then(get_language_from_path);
-            let rendered_lines: Vec<String> = match &lang {
+            let highlighted;
+            let plain: Vec<String>;
+            let rendered_lines: &[String] = match &lang {
                 Some(lang) => match cache {
-                    Some(cache) => cache.highlighted_lines.clone(),
-                    None => highlight_code(&replace_tabs(&normalize_display_text(&file_content)), Some(lang)),
+                    Some(cache) => &cache.highlighted_lines,
+                    None => {
+                        highlighted = highlighter.highlight(
+                            &replace_tabs(&normalize_display_text(&file_content)),
+                            Some(lang),
+                        );
+                        &highlighted
+                    }
                 },
-                None => normalize_display_text(&file_content).split('\n').map(str::to_string).collect(),
+                None => {
+                    plain = normalize_display_text(&file_content)
+                        .split('\n')
+                        .map(str::to_string)
+                        .collect();
+                    &plain
+                }
             };
             let lines = trim_trailing_empty_lines(rendered_lines);
             let total_lines = lines.len();
@@ -227,40 +251,44 @@ fn format_write_result(result: &AgentToolResult, is_error: bool, theme: &Theme) 
 pub fn write_renderers() -> ToolRenderers {
     ToolRenderers {
         render_shell: None,
-        render_call: Some(Arc::new(|args: &Value, theme: &Arc<Theme>, context: &ToolRenderContext| {
-            let raw_path = str_ref(path_arg(args));
-            let file_content = str_ref(arg(args, "content"));
-            let component = context
-                .last_component
-                .as_ref()
-                .and_then(downcast_component::<WriteCallRenderComponent>)
-                .unwrap_or_else(|| Arc::new(WriteCallRenderComponent::new()));
-            let cache = {
-                let mut cache_slot = component.cache.lock();
-                *cache_slot = match &file_content {
-                    Some(file_content) => {
-                        if context.args_complete {
-                            rebuild_write_highlight_cache_full(raw_path.as_deref(), file_content)
-                        } else {
-                            update_write_highlight_cache_incremental(cache_slot.take(), raw_path.as_deref(), file_content)
+        render_call: Some(Arc::new(
+            |args: &Value, theme: &Arc<Theme>, context: &ToolRenderContext| {
+                let raw_path = str_ref(path_arg(args));
+                let file_content = str_ref(arg(args, "content"));
+                let component = context
+                    .last_component
+                    .as_ref()
+                    .and_then(downcast_component::<WriteCallRenderComponent>)
+                    .unwrap_or_else(|| Arc::new(WriteCallRenderComponent::new()));
+                let text = {
+                    let mut cache_slot = component.cache.lock();
+                    *cache_slot = match &file_content {
+                        Some(file_content) if !context.args_complete => {
+                            update_write_highlight_cache_incremental(
+                                cache_slot.take(),
+                                raw_path.as_deref(),
+                                file_content,
+                                &component.highlighter,
+                            )
                         }
-                    }
-                    None => None,
+                        _ => None,
+                    };
+                    format_write_call(
+                        args,
+                        ToolRenderResultOptions {
+                            expanded: context.expanded,
+                            is_partial: context.is_partial,
+                        },
+                        theme,
+                        cache_slot.as_ref(),
+                        &component.highlighter,
+                        &context.cwd,
+                    )
                 };
-                cache_slot.clone()
-            };
-            component.set_text(format_write_call(
-                args,
-                ToolRenderResultOptions {
-                    expanded: context.expanded,
-                    is_partial: context.is_partial,
-                },
-                theme,
-                cache.as_ref(),
-                &context.cwd,
-            ));
-            as_component(component)
-        })),
+                component.set_text(text);
+                as_component(component)
+            },
+        )),
         render_result: Some(Arc::new(
             |result: &AgentToolResult, _options: ToolRenderResultOptions, theme: &Arc<Theme>, context: &ToolRenderContext| {
                 match format_write_result(result, context.is_error, theme) {

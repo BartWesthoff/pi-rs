@@ -174,12 +174,22 @@ impl MarkedOptions {
 
 /// Lex markdown into block tokens (with inline tokens resolved), like `marked.lexer()`.
 pub fn lexer(src: &str, options: MarkedOptions) -> Vec<Token> {
+    lexer_with_link_defs(src, options).0
+}
+
+/// [`lexer`], plus whether the source defines reference links (marked's non-empty `tokens.links`).
+///
+/// A reference link resolves through a definition anywhere in the text, so with definitions the
+/// rendering of a block can depend on other blocks.
+pub fn lexer_with_link_defs(src: &str, options: MarkedOptions) -> (Vec<Token>, bool) {
     // A frame lexing while the grammar is still being compiled in the background would wait for it
     // with the UI lock held (about a second in debug builds), stalling every agent-event update.
     if !WARM_UP_THREAD.with(std::cell::Cell::get) {
         crate::ui_lock::unlocked(wait_for_warm_up);
     }
-    Lexer::new(options).lex(src)
+    let mut lexer = Lexer::new(options);
+    let tokens = lexer.lex(src);
+    (tokens, !lexer.links.is_empty())
 }
 
 thread_local! {

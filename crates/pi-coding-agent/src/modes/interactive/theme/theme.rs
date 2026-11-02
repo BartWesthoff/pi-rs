@@ -12,7 +12,9 @@ use crate::modes::interactive::theme::system_theme::{
 use crate::modes::interactive::theme::theme_schema::{ThemeColorValue, ValidatedThemeJson};
 use crate::modes::interactive::theme::theme_tokens::{THEME_TOKENS, ThemeTokenSlot};
 use crate::utils::fs_watch::{FsWatcher, WatchEventType, close_watcher, watch_with_error_handler};
-use crate::utils::syntax_highlight::{HighlightOptions, highlight, supports_language};
+use crate::utils::syntax_highlight::{
+    HighlightOptions, get_highlight_language_count, highlight, supports_language,
+};
 use crate::utils::text::strip_bom;
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
@@ -1210,7 +1212,9 @@ fn get_cli_highlight_theme(t: &Arc<Theme>) -> CliHighlightTheme {
     cache.highlight.clone().unwrap_or_default()
 }
 
-fn highlight_with_theme(code: &str, lang: Option<&str>, fallback_colored: bool) -> Vec<String> {
+/// Highlight code with syntax coloring based on file extension or language.
+/// Returns array of highlighted lines.
+pub fn highlight_code(code: &str, lang: Option<&str>) -> Vec<String> {
     let t = theme();
     // Validate language before highlighting to avoid stderr spam from cli-highlight
     let valid_lang = lang.filter(|l| !l.is_empty() && supports_language(l));
@@ -1227,20 +1231,62 @@ fn highlight_with_theme(code: &str, lang: Option<&str>, fallback_colored: bool) 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| highlight(code, Some(&options))));
     match result {
         Ok(Ok(highlighted)) => highlighted.split('\n').map(str::to_string).collect(),
-        _ => {
-            if fallback_colored {
-                code.split('\n').map(|line| t.fg(&ThemeColor::MdCodeBlock, line)).collect()
-            } else {
-                code.split('\n').map(str::to_string).collect()
-            }
-        }
+        _ => code
+            .split('\n')
+            .map(|line| t.fg(&ThemeColor::MdCodeBlock, line))
+            .collect(),
     }
 }
 
-/// Highlight code with syntax coloring based on file extension or language.
-/// Returns array of highlighted lines.
-pub fn highlight_code(code: &str, lang: Option<&str>) -> Vec<String> {
-    highlight_with_theme(code, lang, false)
+/// The result of a [`CodeHighlighter`] call and what it depends on.
+struct HighlightedCode {
+    code: String,
+    lang: Option<String>,
+    theme: Arc<Theme>,
+    language_count: usize,
+    lines: Arc<Vec<String>>,
+}
+
+/// Highlights code for one owner, such as a tool row, and reuses the last result while the code,
+/// the language, the theme and the registered grammars stay the same.
+///
+/// Each owner keeps its own highlighter, so cached results live as long as the code they show
+/// instead of in a process-wide cache.
+#[derive(Default)]
+pub struct CodeHighlighter {
+    last: Mutex<Option<HighlightedCode>>,
+}
+
+impl CodeHighlighter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Like [`highlight_code`]; the result is shared with later calls.
+    pub fn highlight(&self, code: &str, lang: Option<&str>) -> Arc<Vec<String>> {
+        // Renderers cannot tell a theme change from any other redraw, so the highlighter checks what
+        // its result depends on.
+        let current_theme = theme();
+        let language_count = get_highlight_language_count();
+        let mut last = self.last.lock();
+        if let Some(last) = last.as_ref()
+            && last.code == code
+            && last.lang.as_deref() == lang
+            && Arc::ptr_eq(&last.theme, &current_theme)
+            && last.language_count == language_count
+        {
+            return last.lines.clone();
+        }
+        let lines = Arc::new(highlight_code(code, lang));
+        *last = Some(HighlightedCode {
+            code: code.to_string(),
+            lang: lang.map(str::to_string),
+            theme: current_theme,
+            language_count,
+            lines: lines.clone(),
+        });
+        lines
+    }
 }
 
 /// Get language identifier from file path extension.
@@ -1320,7 +1366,7 @@ pub fn get_markdown_theme() -> MarkdownTheme {
         italic: Arc::new(|text: &str| theme().italic(text)),
         underline: Arc::new(|text: &str| theme().underline(text)),
         strikethrough: Arc::new(|text: &str| theme().strikethrough(text)),
-        highlight_code: Some(Arc::new(|code: &str, lang: Option<&str>| highlight_with_theme(code, lang, true))),
+        highlight_code: Some(Arc::new(highlight_code)),
         code_block_indent: None,
     }
 }

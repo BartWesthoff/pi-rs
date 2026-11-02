@@ -44,8 +44,13 @@ impl Text {
     }
 
     pub fn set_text(&self, text: impl Into<String>) {
+        let text = text.into();
         let mut s = self.lock();
-        s.text = text.into();
+        // Renderers often set the same text on every update; keep the wrapped lines then.
+        if s.text == text {
+            return;
+        }
+        s.text = text;
         s.cache = None;
     }
 
