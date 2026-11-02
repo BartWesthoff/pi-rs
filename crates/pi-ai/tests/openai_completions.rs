@@ -852,3 +852,148 @@ async fn streams_growing_partial_tool_arguments_one_character_at_a_time() {
     assert_eq!(serde_json::Value::Object(call.arguments.clone()), json!({"text": content}));
     assert_eq!(call.arguments_error, None);
 }
+
+// Overflow bodies captured from the local servers on 2026-11-02 (trimmed to the error object the
+// tests need; the servers sent them verbatim with `Content-Type: application/json`). NInfer and
+// llama.cpp return the same 400 for `stream: true` and `stream: false`, before any prefill, so one
+// body per server profile covers both request modes.
+
+/// NInfer 2026-11-01.2, Bonsai2-27B, `--max-context 90048`.
+const NINFER_OVERFLOW_90K: &str = r#"{"error":{"code":"context_length_exceeded","message":"prepared prompt exceeds Engine max_context 90048","param":"messages","type":"invalid_request_error"}}"#;
+/// NInfer 2026-11-01.2, Bonsai2-27B Heretic, `--max-context 131072`.
+const NINFER_OVERFLOW_131K: &str = r#"{"error":{"code":"context_length_exceeded","message":"prepared prompt exceeds Engine max_context 131072","param":"messages","type":"invalid_request_error"}}"#;
+/// llama.cpp b12024, LFM3, `--ctx-size 262144` (newer wording than the fixture above).
+const LLAMA_CPP_B12024_OVERFLOW: &str = r#"{"error":{"code":400,"message":"request (272970 tokens) exceeds the available context size (262144 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":272970,"n_ctx":262144}}"#;
+
+#[tokio::test]
+async fn local_server_overflow_bodies_are_context_overflow() {
+    let cases = [
+        (NINFER_OVERFLOW_90K, 90_048_u64),
+        (NINFER_OVERFLOW_131K, 131_072),
+        (LLAMA_CPP_B12024_OVERFLOW, 262_144),
+    ];
+    for (body, window) in cases {
+        let server = mock_http::MockServer::sequence(vec![mock_http::Response::new(
+            400,
+            "application/json",
+            body.as_bytes().to_vec(),
+        )])
+        .await;
+        let mut model = llama_cpp_model(&server.url);
+        model.context_window = window;
+        let result = openai_completions::stream(&model, &llama_context(), local_options())
+            .result()
+            .await;
+        assert_eq!(result.stop_reason, StopReason::Error, "{body}");
+        // Like the OpenAI SDK in TS Pi, the message is `<status>: <error object>`.
+        let error_object: Value = serde_json::from_str::<Value>(body).expect("fixture is JSON")["error"].clone();
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(format!("400: {error_object}").as_str()),
+        );
+        assert!(is_context_overflow(&result, Some(window)), "{:?}", result.error_message);
+        assert!(!is_retryable_assistant_error(&result), "{:?}", result.error_message);
+        assert_eq!(server.requests().len(), 1, "an overflow is not retried: {body}");
+    }
+}
+
+/// TS Pi 1.4.0 recognises NInfer's overflow only through `"code":"context_length_exceeded"` in the
+/// formatted body; no pattern matches NInfer's message text on its own. pi-rs keeps that parity
+/// (a message-text pattern would be a pi-rs-only addition).
+#[test]
+fn ninfer_overflow_is_matched_by_code_not_by_message_text() {
+    let error = |text: &str| AssistantMessage {
+        stop_reason: StopReason::Error,
+        error_message: Some(text.into()),
+        ..Default::default()
+    };
+    assert!(is_context_overflow(
+        &error(r#"400: {"code":"context_length_exceeded","message":"prepared prompt exceeds Engine max_context 90048"}"#),
+        Some(90_048),
+    ));
+    assert!(!is_context_overflow(
+        &error(r#"400: {"message":"prepared prompt exceeds Engine max_context 90048"}"#),
+        Some(90_048),
+    ));
+}
+
+/// One `chat.completion.chunk` as NInfer frames it.
+fn ninfer_chunk(delta: Value, finish: Option<&str>) -> Value {
+    json!({
+        "choices": [{"delta": delta, "finish_reason": finish, "index": 0, "logprobs": null}],
+        "created": 1_793_654_758, "id": "chatcmpl-ninfer", "model": "bonsai2-27b",
+        "object": "chat.completion.chunk"
+    })
+}
+
+/// A NInfer turn as observed live: the role chunk arrives before prefill, then reasoning and
+/// text, a finish chunk with `"usage": null`, and a trailing `choices: []` chunk with usage.
+fn ninfer_turn() -> Vec<Value> {
+    let mut finish = ninfer_chunk(json!({}), Some("stop"));
+    finish["usage"] = Value::Null;
+    vec![
+        ninfer_chunk(json!({"content": "", "role": "assistant"}), None),
+        ninfer_chunk(json!({"reasoning_content": "The answer is "}), None),
+        ninfer_chunk(json!({"reasoning_content": "short ✓"}), None),
+        ninfer_chunk(json!({"content": "OK — done."}), None),
+        finish,
+        json!({
+            "choices": [], "created": 1_793_654_758, "id": "chatcmpl-ninfer", "model": "bonsai2-27b",
+            "object": "chat.completion.chunk",
+            "usage": {"completion_tokens": 6, "prompt_tokens": 70_051, "total_tokens": 70_057,
+                      "prompt_tokens_details": {"cached_tokens": 0}},
+            "timings": {"cache_n": 0, "prompt_n": 70_051, "prompt_ms": 36_731.0}
+        }),
+    ]
+}
+
+/// NInfer's SSE comment frame, sent every 5 s while a long prompt is prefilled.
+const KEEP_ALIVE: &str = ": keep-alive\n\n";
+
+#[tokio::test]
+async fn keep_alive_comment_frames_do_not_change_the_stream_at_any_byte_split() {
+    let chunks = ninfer_turn();
+    let plain = openai_sse_body(&chunks);
+    let whole = mock_http::MockServer::sequence(vec![mock_http::Response::sse(&plain)]).await;
+    let (reference_events, reference) = openai_completions::stream(
+        &llama_cpp_model(&whole.url),
+        &llama_context(),
+        local_options(),
+    )
+    .collect_all()
+    .await;
+    assert_eq!(reference.stop_reason, StopReason::Stop, "{:?}", reference.error_message);
+    assert_eq!(reference.content[0].as_thinking().expect("thinking block").thinking, "The answer is short ✓");
+    assert_eq!(reference.content[1].as_text().expect("text block").text, "OK — done.");
+    assert_eq!((reference.usage.input, reference.usage.output), (70_051, 6));
+    let reference_trace = event_trace(&reference_events);
+
+    // Keep-alives and a stray blank line before the first chunk, a run of keep-alives during
+    // prefill after the role chunk, and one between every later chunk and before `[DONE]`.
+    let mut with_keep_alives = format!("\n{KEEP_ALIVE}{KEEP_ALIVE}");
+    for (i, chunk) in chunks.iter().enumerate() {
+        with_keep_alives.push_str(&format!("data: {chunk}\n\n"));
+        with_keep_alives.push_str(&KEEP_ALIVE.repeat(if i == 0 { 7 } else { 1 }));
+    }
+    with_keep_alives.push_str("data: [DONE]\n\n");
+
+    for size in [1, 2, 3, 5, 7, 11, 13, 64, 333, with_keep_alives.len()] {
+        let server = mock_http::MockServer::sequence(vec![mock_http::Response::chunked(
+            200,
+            "text/event-stream",
+            split_bytes(&with_keep_alives, size),
+        )])
+        .await;
+        let (events, message) = openai_completions::stream(
+            &llama_cpp_model(&server.url),
+            &llama_context(),
+            local_options(),
+        )
+        .collect_all()
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Stop, "split at {size} bytes: {:?}", message.error_message);
+        assert_eq!(message.content, reference.content, "split at {size} bytes");
+        assert_eq!(message.usage, reference.usage, "split at {size} bytes");
+        assert_eq!(event_trace(&events), reference_trace, "split at {size} bytes");
+    }
+}
