@@ -65,3 +65,7 @@ path = "src/main.rs"
 [[bench]]
 name = "stream_local"
 harness = false
+
+[[bench]]
+name = "tui_render"
+harness = false
