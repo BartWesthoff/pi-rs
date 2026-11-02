@@ -1103,25 +1103,29 @@ impl GoogleChunkReader {
     }
 
     fn drain_events(&mut self) -> anyhow::Result<()> {
+        // Events are read in place and the consumed prefix is dropped once.
+        let mut start = 0;
         loop {
+            let rest = &self.buffer[start..];
             let mut found: Option<(usize, usize)> = None;
             for delimiter in ["\n\n", "\r\r", "\r\n\r\n"] {
-                if let Some(index) = self.buffer.find(delimiter)
+                if let Some(index) = rest.find(delimiter)
                     && found.is_none_or(|(i, _)| index < i)
                 {
                     found = Some((index, delimiter.len()));
                 }
             }
-            let Some((index, length)) = found else { return Ok(()) };
-            let event = self.buffer[..index].to_string();
-            self.buffer = self.buffer[index + length..].to_string();
-            let trimmed = event.trim();
+            let Some((index, length)) = found else { break };
+            let trimmed = rest[..index].trim();
+            start += index + length;
             if let Some(data) = trimmed.strip_prefix("data:") {
                 let data = data.trim();
                 let json: Value = crate::utils::js_json::js_json_parse(data).map_err(anyhow::Error::msg)?;
                 self.queue.push_back(json);
             }
         }
+        self.buffer.drain(..start);
+        Ok(())
     }
 
     /// The next chunk; `Ok(None)` at the end of the stream.

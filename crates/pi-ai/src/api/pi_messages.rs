@@ -391,13 +391,16 @@ impl FrameDecoder {
         self.buffer.push_str(text);
         self.buffer = self.buffer.replace("\r\n", "\n");
         let mut events = Vec::new();
-        while let Some(split) = self.buffer.find("\n\n") {
-            let frame = self.buffer[..split].to_string();
-            self.buffer = self.buffer[split + 2..].to_string();
-            if let Some(event) = parse_pi_messages_event(&frame)? {
+        // Frames are read in place and the consumed prefix is dropped once per chunk.
+        let mut start = 0;
+        while let Some(split) = self.buffer[start..].find("\n\n") {
+            let frame = &self.buffer[start..start + split];
+            start += split + 2;
+            if let Some(event) = parse_pi_messages_event(frame)? {
                 events.push(event);
             }
         }
+        self.buffer.drain(..start);
         Ok(events)
     }
 

@@ -101,7 +101,11 @@ impl SseDecoder {
     pub fn push_text(&mut self, text: &str) -> Vec<ServerSentEvent> {
         self.buffer.push_str(text);
         let mut events = Vec::new();
-        while let Some(index) = next_line_break(&self.buffer) {
+        // Lines are read in place and the consumed prefix is dropped once, so a chunk holding
+        // many events costs time linear in its length.
+        let mut start = 0;
+        while let Some(offset) = next_line_break(&self.buffer[start..]) {
+            let index = start + offset;
             let bytes = self.buffer.as_bytes();
             let mut next = index + 1;
             if bytes[index] == b'\r' {
@@ -112,12 +116,12 @@ impl SseDecoder {
                     next += 1;
                 }
             }
-            let line = self.buffer[..index].to_string();
-            self.buffer = self.buffer[next..].to_string();
-            if let Some(event) = self.state.decode_line(&line) {
+            if let Some(event) = self.state.decode_line(&self.buffer[start..index]) {
                 events.push(event);
             }
+            start = next;
         }
+        self.buffer.drain(..start);
         events
     }
 
@@ -245,5 +249,27 @@ mod tests {
         assert_eq!(events[1].data, "x\ny");
         assert_eq!(events[1].raw, vec![": comment", "event: b", "data: x", "data:y"]);
         assert_eq!(events[2].data, "caf\u{e9}");
+    }
+
+    #[test]
+    fn decodes_many_events_in_one_chunk_and_split_at_every_byte() {
+        let body: String = (0..2_000)
+            .map(|i| format!("data: {{\"n\":{i}}}\r\n\r\n"))
+            .collect();
+        let mut whole = SseDecoder::new();
+        let mut events = whole.push_text(&body);
+        events.extend(whole.finish());
+        assert_eq!(events.len(), 2_000);
+        assert_eq!(events[1_999].data, "{\"n\":1999}");
+        assert!(whole.buffer.is_empty());
+
+        let mut split = SseDecoder::new();
+        let mut pieces = Vec::new();
+        for byte in body.as_bytes()[..2_000].chunks(1) {
+            pieces.extend(split.push_bytes(byte));
+        }
+        pieces.extend(split.push_bytes(&body.as_bytes()[2_000..]));
+        pieces.extend(split.finish());
+        assert_eq!(pieces, events);
     }
 }

@@ -493,23 +493,39 @@ impl MistralEventReader {
         }
     }
 
+    /// Queue the complete events in the buffer; returns true at `[DONE]`. Events are read in place
+    /// and the consumed prefix is dropped once.
+    fn take_events(
+        &mut self,
+        queue: &mut std::collections::VecDeque<Value>,
+    ) -> anyhow::Result<bool> {
+        let mut start = 0;
+        let mut done = false;
+        while let Some((offset, length)) = find_boundary(&self.buffer[start..]) {
+            let event = parse_event(&self.buffer[start..start + offset]);
+            start += offset + length;
+            match event? {
+                Some(MistralEvent::Done) => {
+                    done = true;
+                    break;
+                }
+                Some(MistralEvent::Data(event)) => queue.push_back(event),
+                None => {}
+            }
+        }
+        self.buffer.drain(..start);
+        Ok(done)
+    }
+
     /// The next event; `Ok(None)` at the end of the stream or after `[DONE]`.
     async fn next(&mut self, queue: &mut std::collections::VecDeque<Value>) -> anyhow::Result<bool> {
         loop {
             if self.finished {
                 return Ok(false);
             }
-            while let Some((index, length)) = find_boundary(&self.buffer) {
-                let raw = self.buffer[..index].to_string();
-                self.buffer = self.buffer[index + length..].to_string();
-                match parse_event(&raw)? {
-                    Some(MistralEvent::Done) => {
-                        self.finished = true;
-                        return Ok(!queue.is_empty());
-                    }
-                    Some(MistralEvent::Data(event)) => queue.push_back(event),
-                    None => {}
-                }
+            if self.take_events(queue)? {
+                self.finished = true;
+                return Ok(!queue.is_empty());
             }
             if !queue.is_empty() {
                 return Ok(true);
@@ -535,17 +551,9 @@ impl MistralEventReader {
                         let rest = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
                         self.buffer.push_str(&rest);
                     }
-                    while let Some((index, length)) = find_boundary(&self.buffer) {
-                        let raw = self.buffer[..index].to_string();
-                        self.buffer = self.buffer[index + length..].to_string();
-                        match parse_event(&raw)? {
-                            Some(MistralEvent::Done) => {
-                                self.finished = true;
-                                return Ok(!queue.is_empty());
-                            }
-                            Some(MistralEvent::Data(event)) => queue.push_back(event),
-                            None => {}
-                        }
+                    if self.take_events(queue)? {
+                        self.finished = true;
+                        return Ok(!queue.is_empty());
                     }
                     if !self.buffer.trim().is_empty() {
                         let raw = std::mem::take(&mut self.buffer);
