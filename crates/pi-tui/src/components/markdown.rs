@@ -181,6 +181,9 @@ struct State {
     /// The last render. While a message streams only its last block changes, so a render styles and
     /// wraps only that block; [`Markdown::set_text`] keeps it for reuse, invalidation drops it.
     rendered: Option<Arc<Rendered>>,
+    /// `rendered` is the output for the current text. [`Markdown::set_text`] clears it even for the
+    /// same text, because the transform may render it differently (for example once streaming ends).
+    rendered_current: bool,
     /// Tokens depend only on the source, so they survive theme and width invalidation.
     cached_tokens: Option<Arc<Lexed>>,
     /// Bumped by every change that invalidates rendered output, so a render that ran without the
@@ -893,6 +896,7 @@ impl Markdown {
                 options: options.unwrap_or_default(),
                 default_style_prefix: None,
                 rendered: None,
+                rendered_current: false,
                 cached_tokens: None,
                 generation: 0,
             }),
@@ -923,6 +927,7 @@ impl Markdown {
     pub fn set_text(&self, text: impl Into<String>) {
         let mut s = self.lock();
         s.text = text.into();
+        s.rendered_current = false;
         s.generation += 1;
     }
 
@@ -1107,6 +1112,7 @@ impl Component for Markdown {
         let input = {
             let s = self.lock();
             if let Some(rendered) = &s.rendered
+                && s.rendered_current
                 && rendered.text == s.text
                 && rendered.width == width
             {
@@ -1132,6 +1138,7 @@ impl Component for Markdown {
         let mut s = self.lock();
         if s.generation == generation {
             s.rendered = Some(Arc::new(rendered));
+            s.rendered_current = true;
             s.cached_tokens = cached_tokens;
             s.default_style_prefix = default_style_prefix;
         }

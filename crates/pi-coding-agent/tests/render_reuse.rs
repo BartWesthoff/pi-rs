@@ -114,8 +114,8 @@ fn assistant_message_reuses_its_markdown_across_streaming_and_its_end_and_render
     init_theme(Some("dark"), Some(false));
 }
 
-#[tokio::test]
-async fn code_highlighter_reuses_its_last_result_until_the_code_the_theme_or_the_grammars_change() {
+#[test]
+fn code_highlighter_reuses_its_last_result_until_the_code_the_theme_or_the_grammars_change() {
     let _guard = setup();
     let code = "const page = html`<div class=\"x\">ok</div>`;";
     let highlighter = CodeHighlighter::new();
@@ -135,7 +135,12 @@ async fn code_highlighter_reuses_its_last_result_until_the_code_the_theme_or_the
         highlight_code(code, Some("javascript"))
     );
     let light = highlighter.highlight(code, Some("javascript"));
-    load_all_highlight_languages().await.unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(load_all_highlight_languages())
+        .unwrap();
     assert_ne!(*highlighter.highlight(code, Some("javascript")), *light);
     init_theme(Some("dark"), Some(false));
 }
