@@ -187,7 +187,7 @@ fn tool_turn_reply(index: usize) -> Response {
     let turn = index / 2;
     let usage = json!({"id": "chatcmpl-local", "choices": [],
                        "usage": {"prompt_tokens": 100 + index, "completion_tokens": 10, "total_tokens": 110 + index}});
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         Response::sse(&sse_text(&[
             chunk(json!({"role": "assistant", "content": null}), None),
             chunk(json!({"reasoning_content": format!("Turn {turn}: read the notes ✓")}), None),
