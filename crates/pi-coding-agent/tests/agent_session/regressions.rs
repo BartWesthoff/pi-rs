@@ -563,7 +563,7 @@ async fn compacts_length_stop_overflow_before_a_new_prompt_without_continuing_fr
     let now = now_ms();
     harness.session_manager.append_message(user_blocks("previous prompt", now - 1000)).unwrap();
     let mut length_stop = create_assistant(&harness, StopReason::Length, None, 100, now - 500);
-    length_stop.content = vec![faux_text("length-stop assistant response")];
+    length_stop.content = vec![faux_text("length-stop assistant response")].into();
     harness.session_manager.append_message(AgentMessage::Assistant(length_stop)).unwrap();
     harness.session.agent().set_messages(harness.session_manager.build_session_context().messages);
     harness.set_responses(vec![text("answered next prompt")]);
@@ -657,7 +657,7 @@ async fn zero_usage_check(user_text: String) -> Vec<(pi_coding_agent::core::exte
     .await
     .unwrap();
     let mut assistant = create_assistant(&harness, StopReason::Stop, None, 0, now_ms());
-    assistant.content = vec![faux_text("response")];
+    assistant.content = vec![faux_text("response")].into();
     harness.session.agent().set_messages(vec![
         user_blocks(&user_text, now_ms() - 1),
         AgentMessage::Assistant(assistant.clone()),
@@ -1856,7 +1856,7 @@ mod auto_compaction_cancellation {
             .append_message(user_blocks(&"x".repeat(500), 1))
             .unwrap();
         let mut assistant = create_assistant(harness, StopReason::Stop, None, 100, 2);
-        assistant.content = vec![faux_text("y".repeat(200))];
+        assistant.content = vec![faux_text("y".repeat(200))].into();
         harness
             .session_manager
             .append_message(AgentMessage::Assistant(assistant))
@@ -2120,7 +2120,7 @@ mod compaction_retries_transient_stream_drop {
     async fn retries_a_transient_terminated_summarization_error_and_compacts_successfully() {
         let harness = harness(json!({"enabled": true, "maxRetries": 3, "baseDelayMs": 0})).await;
         let mut success = create_assistant(&harness, StopReason::Stop, None, 10, now_ms());
-        success.content = vec![faux_text("recovered summary")];
+        success.content = vec![faux_text("recovered summary")].into();
         let calls = use_scripted_stream_fn(
             &harness,
             vec![error(&harness, "terminated"), error(&harness, "terminated"), success],
@@ -3175,7 +3175,7 @@ async fn pre_prompt_recovery_of_a_resumed_length_stop_omits_the_truncated_call_a
         "bash",
         json!({"command": "echo"}).as_object().cloned().unwrap(),
         Some("call_truncated"),
-    )];
+    )].into();
     truncated.usage = serde_json::from_value(json!({
         "input": 100,
         "output": 16,

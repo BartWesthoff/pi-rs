@@ -105,7 +105,7 @@ async fn converts_history_with_tool_results_and_images() {
                 arguments: json!({"text": "x"}).as_object().unwrap().clone(),
                 ..Default::default()
             }),
-        ],
+        ].into(),
         api: "openai-responses".into(),
         provider: "openai".into(),
         model: "gpt".into(),

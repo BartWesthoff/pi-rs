@@ -259,7 +259,7 @@ async fn redacted_reasoning_is_preserved_and_replayed() {
             content: vec![
                 AssistantContent::Thinking(ThinkingContent { thinking: String::new(), thinking_signature: Some(encoded.clone()), redacted: Some(true), ..Default::default() }),
                 AssistantContent::ToolCall(ToolCall { id: "tool-1".into(), name: "read".into(), arguments: json!({ "path": "/tmp/a.txt" }).as_object().cloned().unwrap(), ..Default::default() }),
-            ],
+            ].into(),
             api: "bedrock-converse-stream".into(),
             provider: "amazon-bedrock".into(),
             model: gpt.id.clone(),
@@ -422,7 +422,7 @@ fn nova() -> Model {
 
 fn assistant_with(model: &Model, content: Vec<AssistantContent>, stop: StopReason) -> Message {
     Message::Assistant(AssistantMessage {
-        content,
+        content: content.into(),
         api: "bedrock-converse-stream".into(),
         provider: "amazon-bedrock".into(),
         model: model.id.clone(),

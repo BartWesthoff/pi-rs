@@ -946,7 +946,7 @@ mod tests {
 
     fn response(model: &Model, stop_reason: StopReason) -> AssistantMessage {
         AssistantMessage {
-            content: Vec::new(),
+            content: Vec::new().into(),
             api: model.api.clone(),
             provider: model.provider.clone(),
             model: model.id.clone(),

@@ -29,6 +29,7 @@ use crate::serde_util::{deserialize_some, js_f64, lax_i64, lax_u64, null_as_defa
 pub use crate::utils::diagnostics::AssistantMessageDiagnostic;
 pub use crate::utils::event_stream::AssistantMessageEventStream;
 pub use crate::utils::identity::ClientIdentity;
+use crate::shared_vec::SharedVec;
 
 // ---------------------------------------------------------------------------
 // API / provider identifiers
@@ -905,8 +906,9 @@ impl UserMessage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
+    /// Shared by clones of the message; see [`SharedVec`].
     #[serde(default, deserialize_with = "null_as_default")]
-    pub content: Vec<AssistantContent>,
+    pub content: SharedVec<AssistantContent>,
     pub api: Api,
     pub provider: ProviderId,
     pub model: String,
@@ -949,7 +951,7 @@ impl AssistantMessage {
     /// An empty assistant message for `model` with zero usage.
     pub fn empty_for(model: &Model, timestamp: i64) -> Self {
         Self {
-            content: Vec::new(),
+            content: Vec::new().into(),
             api: model.api.clone(),
             provider: model.provider.clone(),
             model: model.id.clone(),

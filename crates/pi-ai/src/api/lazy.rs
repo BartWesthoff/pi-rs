@@ -10,7 +10,7 @@ use crate::utils::event_stream::AssistantMessageEventStream;
 /// Error message for failures before a provider stream exists.
 pub fn create_setup_error_message(model: &Model, error: &anyhow::Error, timestamp: i64) -> AssistantMessage {
     AssistantMessage {
-        content: Vec::new(),
+        content: Vec::new().into(),
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),

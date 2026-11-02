@@ -416,7 +416,7 @@ fn convert_model(api: &str, provider: &str, id: &str, input: Vec<ModelInputModal
 
 fn assistant(api: &str, provider: &str, model: &str, content: Vec<AssistantContent>) -> Message {
     Message::Assistant(AssistantMessage {
-        content,
+        content: content.into(),
         api: api.into(),
         provider: provider.into(),
         model: model.into(),

@@ -274,7 +274,7 @@ fn overflow_detection() {
 
 fn assistant(provider: &str, api: &str, model: &str, content: Vec<AssistantContent>, stop: StopReason) -> Message {
     Message::Assistant(AssistantMessage {
-        content,
+        content: content.into(),
         api: api.into(),
         provider: provider.into(),
         model: model.into(),

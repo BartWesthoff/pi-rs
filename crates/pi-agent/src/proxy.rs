@@ -207,7 +207,7 @@ pub fn stream_proxy(
         // Initialize the partial message that we'll build up from events.
         let mut state = ProxyState {
             partial: AssistantMessage {
-                content: Vec::new(),
+                content: Vec::new().into(),
                 api: model.api.clone(),
                 provider: model.provider.clone(),
                 model: model.id.clone(),

@@ -359,7 +359,7 @@ fn empty_assistant(
     stop_reason: StopReason,
 ) -> AssistantMessage {
     AssistantMessage {
-        content,
+        content: content.into(),
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),

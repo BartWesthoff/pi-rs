@@ -73,7 +73,7 @@ pub struct FauxMessageOptions {
 /// Build a scripted assistant message.
 pub fn faux_assistant_message(content: Vec<AssistantContent>, options: FauxMessageOptions) -> AssistantMessage {
     AssistantMessage {
-        content,
+        content: content.into(),
         api: DEFAULT_API.to_string(),
         provider: DEFAULT_PROVIDER.to_string(),
         model: DEFAULT_MODEL_ID.to_string(),
@@ -376,7 +376,7 @@ async fn stream_with_deltas(
     tokens_per_second: Option<f64>,
     signal: Option<CancellationToken>,
 ) -> anyhow::Result<()> {
-    let mut partial = AssistantMessage { content: Vec::new(), stop_reason: StopReason::Pending, ..message.clone() };
+    let mut partial = AssistantMessage { content: Vec::new().into(), stop_reason: StopReason::Pending, ..message.clone() };
     if is_aborted(&signal) {
         abort(stream, &partial);
         return Ok(());
