@@ -13,6 +13,7 @@ The TypeScript reference is cloned at:
     <any checkout of https://github.com/earendil-works/pi at the tag you port against, e.g. `git clone https://github.com/earendil-works/pi.git && git -C pi checkout v1.4.0`>
 
 The golden/differential tests read it from `PI_TS_REF` (generators in `scripts/golden/`, `scripts/golden/run.sh`) or `PI_TS_SOURCE` (example-extension tests); without it they skip (see INFRA-04).
+Third-party Pi packages are checked by the package smoke harness (`crates/pi-coding-agent/tests/packages/`): `scripts/package-fixtures.sh` fetches the pinned packages once, `PI_RS_PKG_FIXTURES=1 cargo test -p pi-coding-agent --test packages` runs them offline, and `scripts/package-golden.sh` re-records the TS Pi 1.4.0 golden.
 Never copy TypeScript into this repository.
 
 ## Crate layout

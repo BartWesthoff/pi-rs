@@ -1,0 +1,6 @@
+{
+  "name": "pkg-harness-probe",
+  "version": "0.0.0",
+  "type": "module",
+  "pi": { "extensions": ["./index.js"], "skills": ["./skills"] }
+}
