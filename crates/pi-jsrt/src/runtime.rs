@@ -1,6 +1,6 @@
 //! The thread-safe runtime handle and its public API.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +60,10 @@ pub struct RuntimeOptions {
     pub env: Option<HashMap<String, String>>,
     /// `process.argv`. Defaults to `["pi"]`.
     pub argv: Vec<String>,
+    /// Entries added to `process.versions` after the built-in Node 22 ones, replacing any with
+    /// the same name (e.g. `bun` for an embedder that presents a Bun-compiled host). Workers
+    /// inherit them; `child_process.fork()` children (Node mode) do not. Empty by default.
+    pub versions: BTreeMap<String, String>,
     /// Tokio runtime used for async host functions and I/O. Defaults to the current
     /// runtime if called inside one, otherwise a private 2-worker runtime is created.
     pub tokio: Option<tokio::runtime::Handle>,
@@ -121,6 +125,7 @@ impl Default for RuntimeOptions {
             node_compat: true,
             env: None,
             argv: vec!["pi".to_string()],
+            versions: BTreeMap::new(),
             tokio: None,
             stdout: None,
             stderr: None,

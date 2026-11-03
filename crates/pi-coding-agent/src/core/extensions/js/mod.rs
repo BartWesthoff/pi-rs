@@ -18,6 +18,7 @@ mod api;
 mod builtin;
 mod component;
 mod context;
+mod host_identity;
 mod messages;
 mod native;
 mod provider;
@@ -38,6 +39,7 @@ use crate::core::extensions::runner::ExtensionErrorWithStack;
 use crate::core::extensions::types::*;
 
 pub use component::{JsComponent, JsEditorComponent};
+pub use host_identity::{HOST_IDENTITY, HostIdentity};
 use pi_embed::Embedded;
 
 const BRIDGE_JS: Embedded = pi_embed::include_str!("../../../../js/bridge.js");
@@ -492,8 +494,14 @@ impl JsExtensionHost {
             aliases.insert(from.to_string(), to.to_string());
         }
         aliases.extend(subpath_aliases);
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "pi".to_string());
+        let env: HashMap<String, String> =
+            std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
         let options = RuntimeOptions {
             cwd: Some(std::path::PathBuf::from(cwd)),
+            env: Some(HOST_IDENTITY.env(env, &exe)),
+            argv: HOST_IDENTITY.argv(&exe, crate::cli::setup::process_args().iter().skip(1).cloned()),
+            versions: HOST_IDENTITY.versions(),
             virtual_modules,
             aliases,
             thread_name: "pi-extensions".to_string(),

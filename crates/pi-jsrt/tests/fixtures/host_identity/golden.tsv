@@ -1,0 +1,15 @@
+# Host-identity golden: every field packages probe, Node 22's value, and the value pi's extension
+# runtime presents (pi-coding-agent `HostIdentity::COMPILED_PI`). Both runs start the program with
+# the single argument `--flag`; `PI_SUBAGENT_PI_BINARY` is unset in the parent environment.
+# Columns: probe <TAB> Node 22 <TAB> pi extension runtime <TAB> deliberate difference (why)
+process.versions.bun	undefined	1.3.14	compiled-Pi marker: Pi 1.4.0 release binaries are Bun 1.3.14 executables
+typeof globalThis.Bun	undefined	undefined	
+process.versions.node (major)	22	22	
+process.release.name	node	node	
+process.argv[0]	<execPath>	<execPath>	
+process.argv[1]	<script>	/$bunfs/root/pi	compiled-Pi marker: the virtual entry of a Bun executable named pi
+process.argv.slice(2)	["--flag"]	["--flag"]	
+process.env.PI_SUBAGENT_PI_BINARY	undefined	<execPath>	defaulted so pi-subagents spawns this executable, not the `pi` on PATH
+pi-subagents resolveBunPiExecutable() != undefined	false	true	follows from the two markers: async subagents run on pi-rs
+context-mode hasModernSqlite()	true	true	
+synckit/scripted-workflow Bun branch (typeof versions.bun == string)	false	true	follows from versions.bun; both Bun branches only use Node APIs pi-rs has
