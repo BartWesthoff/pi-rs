@@ -78,6 +78,10 @@ pub(crate) fn config_object(ctx: &mut Context) -> JsResult<JsValue> {
     let argv = array(ctx, argv);
     let exec_argv: Vec<JsValue> = shared.options.exec_argv.iter().map(|a| js_str(a)).collect();
     let exec_argv = array(ctx, exec_argv);
+    let versions = JsObject::with_object_proto(ctx.intrinsics());
+    for (k, v) in &shared.options.versions {
+        versions.set(JsString::from(k.as_str()), js_str(v), true, ctx)?;
+    }
     let node_exec: Vec<JsValue> = match &shared.options.node_exec {
         Some(v) => v.iter().map(|a| js_str(a)).collect(),
         None => vec![
@@ -97,6 +101,7 @@ pub(crate) fn config_object(ctx: &mut Context) -> JsResult<JsValue> {
             ("nodeCompat", JsValue::from(shared.options.node_compat)),
             ("env", env.into()),
             ("argv", argv),
+            ("versions", versions.into()),
             ("execArgv", exec_argv),
             ("nodeExec", node_exec),
             ("cwd", js_str(&shared.cwd.display().to_string())),

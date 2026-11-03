@@ -367,6 +367,7 @@ fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
         env: Some(env),
         argv,
         exec_argv,
+        versions: parent.options.versions.clone(),
         tokio: Some(tokio.clone()),
         stdout: Some(Arc::new(move |b: &[u8]| {
             let b = b.to_vec();

@@ -226,9 +226,11 @@ Object.assign(process, {
   // headers too; it satisfies the version checks of the packages in tests/npm_packages.rs.
   // No `napi`/`openssl` entries: native addons cannot load, and the crypto is not OpenSSL.
   version: "v22.19.0",
+  // `config.versions` is the embedder's overlay (`RuntimeOptions::versions`), e.g. pi's `bun`.
   versions: {
     node: "22.19.0", pi_jsrt: config.version, quickjs: "0.16.2", v8: "0.0", uv: "1.51.0", modules: "127",
     zlib: "1.3.1", brotli: "1.1.0", unicode: "16.0",
+    ...config.versions,
   },
   release: { name: "node", lts: "Jod" },
   platform: config.platform,

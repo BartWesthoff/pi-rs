@@ -378,6 +378,23 @@ Release resources in `session_shutdown` even when normal operation attempted cle
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.
 
+<a id="host-identity"></a>
+
+### Host identity
+
+pi-rs presents itself to extensions as a standalone (compiled) Pi executable, the way Pi's release binaries look to them, so packages written for Pi take their standalone-host paths unchanged:
+
+| Field | Value in the extension runtime | Plain Node 22 |
+|---|---|---|
+| `process.versions.bun` | `"1.3.14"` (the Bun of Pi 1.4.0's release binaries) | `undefined` |
+| `process.argv` | `[<executable>, "/$bunfs/root/pi", ...pi's arguments]` | `[<node>, <script>, ...]` |
+| `process.execPath` | the real pi-rs executable | the node executable |
+| `process.env.PI_SUBAGENT_PI_BINARY` | the pi-rs executable when unset (an explicit value is kept) | inherited |
+| `globalThis.Bun` | `undefined`: pi-rs implements Node's APIs, not Bun's | `undefined` |
+
+Everything else, `process.versions.node` included, is Node 22's. Workers share this identity; processes started with `child_process.fork()` or with the executable as a Node script keep a plain Node identity, though they inherit `PI_SUBAGENT_PI_BINARY` through the environment.
+The values are one constant set, `HostIdentity::COMPILED_PI` in `src/core/extensions/js/host_identity.rs`; the golden in `crates/pi-jsrt/tests/fixtures/host_identity/golden.tsv` lists every probed field next to Node 22's value.
+
 <a id="examples-reference"></a>
 <a id="use-examples-as-the-implementation-reference"></a>
 
