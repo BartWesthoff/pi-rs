@@ -3189,6 +3189,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "http",
+ "hyper",
  "jiff",
  "k256",
  "libc",

@@ -36,10 +36,15 @@ fn default_roots() -> Arc<RootCertStore> {
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let native = rustls_native_certs::load_native_certs();
             roots.add_parsable_certificates(native.certs);
-            if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS")
-                && let Ok(text) = std::fs::read_to_string(path)
-            {
-                roots.add_parsable_certificates(pem_certs(&text));
+            if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS").filter(|p| !p.is_empty()) {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        roots.add_parsable_certificates(pem_certs(&text));
+                    }
+                    // Node warns once, when the first secure context is created, and goes on
+                    // without the extra certificates.
+                    Err(e) => eprintln!("Warning: Ignoring extra certs from `{}`, load failed: {}", path.to_string_lossy(), openssl_io_reason(&e)),
+                }
             }
             Arc::new(roots)
         })
@@ -56,6 +61,68 @@ pub(crate) fn default_client_config(alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Cl
         .with_no_client_auth();
     config.alpn_protocols = alpn;
     Ok(Arc::new(config))
+}
+
+/// OpenSSL's wording of a failed `BIO_new_file`, as Node prints it for `NODE_EXTRA_CA_CERTS`.
+fn openssl_io_reason(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "error:80000002:system library::No such file or directory".into(),
+        std::io::ErrorKind::PermissionDenied => "error:8000000D:system library::Permission denied".into(),
+        _ => format!("error:80000015:system library::{e}"),
+    }
+}
+
+/// The last certificate-verification failure of a [`fetch_client_config`] connection, in Node's
+/// terms (`code`, `message`), so `fetch` can report it as the error's `cause`.
+pub(crate) type AuthSlot = Arc<Mutex<Option<(String, String)>>>;
+
+/// TLS settings of an undici `connect`/`requestTls` option bag, as `fetch` applies them.
+#[derive(Debug, Default)]
+pub(crate) struct FetchTls {
+    /// PEM bundles from `ca`; empty means the default trust store (Mozilla + system +
+    /// `NODE_EXTRA_CA_CERTS`), as in Node, where `ca` replaces the defaults.
+    pub ca: Vec<String>,
+    pub cert: Vec<String>,
+    pub key: Vec<String>,
+    pub passphrase: Option<Vec<u8>>,
+    pub reject_unauthorized: bool,
+    pub alpn: Vec<Vec<u8>>,
+}
+
+/// A rustls client config for native `fetch` with Node's verification rules, plus the slot its
+/// verifier writes failures to.
+pub(crate) fn fetch_client_config(opts: &FetchTls) -> Result<(rustls::ClientConfig, AuthSlot), String> {
+    let roots = if opts.ca.is_empty() {
+        default_roots()
+    } else {
+        let mut roots = RootCertStore::empty();
+        for text in &opts.ca {
+            roots.add_parsable_certificates(pem_certs(text));
+        }
+        Arc::new(roots)
+    };
+    let auth: AuthSlot = Arc::new(Mutex::new(None));
+    let inner = WebPkiServerVerifier::builder_with_provider(roots, provider()).build().map_err(|e| e.to_string())?;
+    let verifier = NodeVerifier { inner, reject: opts.reject_unauthorized, skip_name: false, host: String::new(), result: auth.clone() };
+    let builder = rustls::ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier));
+    let certs: Vec<CertificateDer<'static>> = opts.cert.iter().flat_map(|t| pem_certs(t)).collect();
+    let mut config = match opts.key.first() {
+        Some(key) if !certs.is_empty() => {
+            let key = match import(key.as_bytes(), "pem", "", opts.passphrase.as_deref(), true) {
+                Ok(Imported::Private(k)) => PrivateKeyDer::Pkcs8(k.to_pkcs8().into()),
+                Ok(_) => return Err("error:1E08010C:DECODER routines::unsupported".into()),
+                Err(e) => return Err(e.message),
+            };
+            builder.with_client_auth_cert(certs, key).map_err(|e| e.to_string())?
+        }
+        _ => builder.with_no_client_auth(),
+    };
+    config.alpn_protocols = opts.alpn.clone();
+    Ok((config, auth))
 }
 
 fn pem_certs(text: &str) -> Vec<CertificateDer<'static>> {
@@ -130,7 +197,9 @@ impl ServerCertVerifier for NodeVerifier {
                 if self.skip_name && is_name_error(&e) {
                     return Ok(ServerCertVerified::assertion());
                 }
-                *self.result.lock().unwrap() = Some(auth_error(&e, end_entity, intermediates.len(), &self.host));
+                // A shared (fetch) verifier names the host it is verifying.
+                let host = if self.host.is_empty() { server_name.to_str().into_owned() } else { self.host.clone() };
+                *self.result.lock().unwrap() = Some(auth_error(&e, end_entity, intermediates.len(), &host));
                 if self.reject { Err(e) } else { Ok(ServerCertVerified::assertion()) }
             }
         }
