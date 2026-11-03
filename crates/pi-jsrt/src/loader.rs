@@ -16,6 +16,14 @@
 //! uses syntax detection (like jiti). TypeScript is transpiled with oxc.
 //! ES modules outside `node_modules` get jiti-compatible `__filename`, `__dirname`
 //! and `require` bindings unless they declare those names themselves.
+//!
+//! The embedded `jiti` module (`js/jiti.js`, specifier `jiti`, which beats `node_modules`) loads
+//! module trees in *jiti generations*: a cache generation tied to one `createJiti` instance. A
+//! module loaded in a jiti generation resolves imports the way jiti 2.x does: builtins, then the
+//! instance's `virtualModules`, then its `alias` and the regular resolution. Files jiti would
+//! transpile (TypeScript, ES modules it cannot import natively) load in the generation, so a
+//! `moduleCache: false` import gets fresh instances; files it loads natively (CommonJS, JSON,
+//! ES modules whose graph links natively) are shared with the rest of the runtime.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -42,6 +50,12 @@ pub(crate) enum Resolved {
     Builtin(String),
     Virtual(String),
     File(PathBuf),
+    /// An entry of a jiti instance's `virtualModules` (instance index, specifier).
+    JitiVirtual(usize, String),
+    /// A CommonJS file imported by a module jiti loads (instance index, file): jiti imports it
+    /// natively, so the importer sees Node's namespace of it (`default` is `module.exports`)
+    /// through jiti's interop. The file itself runs once, shared with the runtime.
+    JitiCjs(usize, PathBuf),
 }
 
 impl Resolved {
@@ -53,6 +67,9 @@ impl Resolved {
             Resolved::Virtual(s) => format!("virtual:{s}"),
             Resolved::File(p) if generation == 0 => p.display().to_string(),
             Resolved::File(p) => format!("{}{RELOAD_MARK}{generation}", p.display()),
+            // jiti hands out a new interop view per load: one module per generation.
+            Resolved::JitiVirtual(scope, s) => format!("jiti-virtual:{scope}:{generation}:{s}"),
+            Resolved::JitiCjs(scope, p) => format!("jiti-cjs:{scope}:{generation}:{}", p.display()),
         }
     }
 }
@@ -99,6 +116,46 @@ impl Kind {
     }
 }
 
+/// A `createJiti` instance, as far as module loading is concerned.
+struct JitiScope {
+    /// The `virtualModules` option (looked up with `in`, like jiti does).
+    virtual_modules: Option<JsObject>,
+    /// Whether the instance has `alias` entries (applied by `internal.jitiAlias`).
+    has_alias: bool,
+    /// Whether loaded modules go through jiti's `interopDefault` proxy.
+    interop_default: bool,
+    /// `nativeModules` (always `typescript` and `jiti` too) and `transformModules` package names.
+    native_modules: Vec<String>,
+    transform_modules: Vec<String>,
+    /// The generation reused while `moduleCache` is on, per kind of load.
+    cached: [Option<u32>; 2],
+}
+
+/// A jiti generation: the instance it belongs to and how its static imports load (an import
+/// tree uses `jiti.import` semantics, a require tree `jiti()` semantics).
+#[derive(Debug, Clone, Copy)]
+struct JitiGeneration {
+    scope: usize,
+    kind: Kind,
+}
+
+/// How jiti loads a resolved module (see [`Loader::resolve_jiti`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JitiLoad {
+    /// Natively: shared with the rest of the runtime.
+    Native,
+    /// Transpiled: in the jiti generation.
+    Transpile,
+    /// A native ES module under `import`: jiti tries a native import first and transpiles when
+    /// that fails.
+    TryNative,
+}
+
+/// Extensions jiti handles itself (others load natively).
+const JITI_EXTENSIONS: &[&str] = &[
+    "js", "mjs", "cjs", "ts", "tsx", "mts", "cts", "mtsx", "ctsx",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
     Esm,
@@ -125,7 +182,13 @@ pub(crate) struct Loader {
     values: RefCell<HashMap<String, JsValue>>,
     pkg_json: RefCell<HashMap<PathBuf, Option<Rc<Value>>>>,
     generation: Cell<u32>,
+    /// Last generation number handed out (cache clears and jiti generations share the space).
+    last_generation: Cell<u32>,
     evals: Cell<u32>,
+    jiti_scopes: RefCell<Vec<JitiScope>>,
+    jiti_generations: RefCell<HashMap<u32, JitiGeneration>>,
+    /// Whether a file's static import graph resolves natively, per jiti generation.
+    native_links: RefCell<HashMap<(u32, PathBuf), bool>>,
 }
 
 impl Loader {
@@ -140,12 +203,12 @@ impl Loader {
             values: RefCell::default(),
             pkg_json: RefCell::default(),
             generation: Cell::new(0),
+            last_generation: Cell::new(0),
             evals: Cell::new(0),
+            jiti_scopes: RefCell::default(),
+            jiti_generations: RefCell::default(),
+            native_links: RefCell::default(),
         }
-    }
-
-    fn key(&self, resolved: &Resolved) -> String {
-        resolved.key_at(self.generation.get())
     }
 
     /// The module name for `resolved`, registered for the QuickJS loader callback.
@@ -180,9 +243,10 @@ impl Loader {
 
     /// jiti-style `__filename`/`__dirname`/`require` for ES modules, unless disabled
     /// ([`crate::RuntimeOptions::esm_cjs_globals`]).
-    fn cjs_globals(&self, code: &str, declared: &[&str]) -> String {
+    /// In a jiti generation, the injected `require` resolves like the jiti instance's.
+    fn cjs_globals(&self, code: &str, declared: &[&str], jiti: Option<u32>) -> String {
         if self.shared.options.esm_cjs_globals {
-            inject_cjs_globals(code, declared)
+            inject_cjs_globals(code, declared, jiti)
         } else {
             code.to_string()
         }
@@ -192,12 +256,22 @@ impl Loader {
         self.synthetic.borrow_mut().clear();
         self.cjs.borrow_mut().clear();
         self.values.borrow_mut().clear();
+        self.jiti_scopes.borrow_mut().clear();
+        self.jiti_generations.borrow_mut().clear();
+    }
+
+    /// A generation number not used before.
+    fn new_generation(&self) -> u32 {
+        let next = self.last_generation.get() + 1;
+        self.last_generation.set(next);
+        next
     }
 
     /// Forget loaded files: QuickJS cannot unload modules, so later loads use new module names
     /// (a new generation), which re-reads and re-evaluates the files.
     fn clear_files(&self) {
-        self.generation.set(self.generation.get() + 1);
+        self.generation.set(self.new_generation());
+        self.native_links.borrow_mut().clear();
         self.cjs
             .borrow_mut()
             .retain(|k, _| k.starts_with("builtin:") || k.starts_with("virtual:"));
@@ -476,10 +550,265 @@ impl Loader {
     }
 
     // -----------------------------------------------------------------------
+    // jiti (see `js/jiti.js`)
+    // -----------------------------------------------------------------------
+
+    /// The jiti generation numbered `generation`, if it is one.
+    fn jiti_generation(&self, generation: u32) -> Option<JitiGeneration> {
+        self.jiti_generations.borrow().get(&generation).copied()
+    }
+
+    /// The jiti generation the module named `name` belongs to, if any.
+    fn jiti_generation_of(&self, name: &str) -> Option<u32> {
+        let generation = self.generation_of(name);
+        self.jiti_generation(generation).map(|_| generation)
+    }
+
+    /// Resolve `spec`, loaded (`kind`) from a module of jiti generation `jg`, like jiti's
+    /// `jitiRequire`: builtins first, then the instance's virtual modules, then its aliases and
+    /// the regular resolution (with the other kind's conditions as a fallback).
+    fn resolve_jiti(
+        &self,
+        ctx: &mut Context,
+        spec: &str,
+        base_dir: &Path,
+        jg: JitiGeneration,
+        kind: Kind,
+    ) -> Result<(Resolved, JitiLoad), Error> {
+        if let Some(name) = builtin_name(ctx, spec) {
+            return Ok((Resolved::Builtin(name), JitiLoad::Native));
+        }
+        // Copied out so no borrow is held while JS runs (`in` may hit a proxy trap).
+        let (virtual_modules, has_alias) = {
+            let scopes = self.jiti_scopes.borrow();
+            let scope = scopes
+                .get(jg.scope)
+                .ok_or_else(|| Error::host("the jiti instance was released"))?;
+            (scope.virtual_modules.clone(), scope.has_alias)
+        };
+        if let Some(vm) = virtual_modules
+            && vm
+                .has_property(spec, ctx)
+                .map_err(|e| error::from_js(e, ctx))?
+        {
+            return Ok((
+                Resolved::JitiVirtual(jg.scope, spec.to_string()),
+                JitiLoad::Native,
+            ));
+        }
+        let spec = if has_alias {
+            jiti_alias(ctx, jg.scope, spec).map_err(|e| error::from_js(e, ctx))?
+        } else {
+            spec.to_string()
+        };
+        let resolved = self.resolve_either(ctx, &spec, base_dir, kind)?;
+        let load = match &resolved {
+            Resolved::File(path) => self.jiti_load(path, jg.scope, kind),
+            _ => JitiLoad::Native,
+        };
+        if let (Resolved::File(path), JitiLoad::Native, Kind::Import) = (&resolved, load, kind)
+            && path.extension().is_none_or(|e| e != "json")
+            && self
+                .prepare_file(ctx, path, None)
+                .is_ok_and(|p| p.format == Format::Cjs)
+        {
+            return Ok((Resolved::JitiCjs(jg.scope, path.clone()), JitiLoad::Native));
+        }
+        Ok((resolved, load))
+    }
+
+    /// Resolve with `kind`'s conditions, then the other kind's (as jiti tries both).
+    fn resolve_either(
+        &self,
+        ctx: &mut Context,
+        spec: &str,
+        base_dir: &Path,
+        kind: Kind,
+    ) -> Result<Resolved, Error> {
+        let other = match kind {
+            Kind::Import => Kind::Require,
+            Kind::Require => Kind::Import,
+        };
+        self.resolve(ctx, spec, base_dir, kind)
+            .or_else(|e| self.resolve(ctx, spec, base_dir, other).map_err(|_| e))
+    }
+
+    /// How jiti loads the file `path` (jiti's `evalModule` `needsTranspile`).
+    fn jiti_load(&self, path: &Path, scope: usize, kind: Kind) -> JitiLoad {
+        let (native, transform) = {
+            let scopes = self.jiti_scopes.borrow();
+            let Some(s) = scopes.get(scope) else {
+                return JitiLoad::Native;
+            };
+            (
+                in_packages(path, &s.native_modules),
+                in_packages(path, &s.transform_modules),
+            )
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if native
+            || ext == "json"
+            || ext == "cjs"
+            || !(ext.is_empty() || JITI_EXTENSIONS.contains(&ext))
+        {
+            return JitiLoad::Native;
+        }
+        let typescript = matches!(ext, "ts" | "tsx" | "mts" | "cts" | "mtsx" | "ctsx");
+        let esm =
+            ext == "mjs" || (ext == "js" && self.package_type(path).as_deref() == Some("module"));
+        if esm && kind == Kind::Import {
+            return JitiLoad::TryNative;
+        }
+        if typescript || esm || transform || self.has_module_syntax(path) {
+            JitiLoad::Transpile
+        } else {
+            JitiLoad::Native
+        }
+    }
+
+    fn read_source(&self, path: &Path) -> Option<String> {
+        let source = self.shared.file_sources.read().get(path).cloned();
+        source.or_else(|| std::fs::read_to_string(path).ok())
+    }
+
+    fn has_module_syntax(&self, path: &Path) -> bool {
+        self.read_source(path).is_some_and(|text| {
+            transpile::transpile(&text, path, SourceLang::JavaScript)
+                .is_ok_and(|out| out.has_module_syntax)
+        })
+    }
+
+    /// Whether a native import of `path` would link: every static import in its graph resolves
+    /// and parses (jiti's native-first `import` falls back to transpiling when it does not).
+    fn links_natively(
+        &self,
+        ctx: &mut Context,
+        path: &Path,
+        generation: u32,
+        visiting: &mut std::collections::HashSet<PathBuf>,
+    ) -> bool {
+        let memo = (generation, path.to_path_buf());
+        if let Some(&links) = self.native_links.borrow().get(&memo) {
+            return links;
+        }
+        if !visiting.insert(path.to_path_buf()) {
+            return true;
+        }
+        let links = (|| {
+            if path.extension().is_some_and(|e| e == "json") {
+                return true;
+            }
+            let Some(text) = self.read_source(path) else {
+                return false;
+            };
+            let imports = match transpile::static_imports(&text, path, SourceLang::from_path(path))
+            {
+                Ok(Some(imports)) => imports,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            let dir = path.parent().unwrap_or(Path::new("/"));
+            imports
+                .iter()
+                .all(|spec| match self.resolve(ctx, spec, dir, Kind::Import) {
+                    Ok(Resolved::File(dep)) => self.links_natively(ctx, &dep, generation, visiting),
+                    Ok(_) => true,
+                    Err(_) => false,
+                })
+        })();
+        self.native_links.borrow_mut().insert(memo, links);
+        links
+    }
+
+    /// The module name for `resolved` loaded as `load` from jiti generation `generation`.
+    fn jiti_module_name(
+        &self,
+        ctx: &mut Context,
+        resolved: &Resolved,
+        load: JitiLoad,
+        generation: u32,
+    ) -> String {
+        let native = match (load, resolved) {
+            (_, Resolved::JitiVirtual(..) | Resolved::JitiCjs(..)) => false,
+            (JitiLoad::Native, _) => true,
+            (JitiLoad::Transpile, _) => false,
+            (JitiLoad::TryNative, Resolved::File(path)) => {
+                self.links_natively(ctx, path, generation, &mut Default::default())
+            }
+            (JitiLoad::TryNative, _) => true,
+        };
+        let at = if native {
+            self.generation.get()
+        } else {
+            generation
+        };
+        self.module_name_at(resolved, at)
+    }
+
+    /// `require(spec)` from `parent` in jiti generation `generation` (jiti's synchronous
+    /// `jitiRequire`), with the instance's `interopDefault`.
+    fn jiti_require(
+        self: &Rc<Self>,
+        ctx: &mut Context,
+        generation: u32,
+        spec: &str,
+        parent: Option<&Path>,
+    ) -> JsResult<JsValue> {
+        let jg = self
+            .jiti_generation(generation)
+            .ok_or_else(|| engine::type_error(format!("unknown jiti generation {generation}")))?;
+        let base = referrer_dir(ctx, parent);
+        let (resolved, load) = self
+            .resolve_jiti(ctx, spec, &base, jg, Kind::Require)
+            .map_err(|e| error::to_js(&e, ctx))?;
+        let value = if load == JitiLoad::Native {
+            self.require_resolved_at(ctx, &resolved, self.generation.get(), parent)?
+        } else {
+            let ns = self.require_resolved_at(ctx, &resolved, generation, parent)?;
+            call_internal(ctx, "jitiExports", &[ns])?
+        };
+        self.jiti_interop(ctx, jg.scope, value)
+    }
+
+    /// jiti's `interopDefault` proxy, when the instance enables it.
+    fn jiti_interop(&self, ctx: &mut Context, scope: usize, value: JsValue) -> JsResult<JsValue> {
+        let interop = self
+            .jiti_scopes
+            .borrow()
+            .get(scope)
+            .is_some_and(|s| s.interop_default);
+        if !interop {
+            return Ok(value);
+        }
+        call_internal(ctx, "jitiInteropDefault", &[value])
+    }
+
+    /// The value of virtual module `spec` of jiti instance `scope`.
+    fn jiti_virtual_value(&self, ctx: &mut Context, scope: usize, spec: &str) -> JsResult<JsValue> {
+        let vm = self
+            .jiti_scopes
+            .borrow()
+            .get(scope)
+            .and_then(|s| s.virtual_modules.clone());
+        match vm {
+            Some(vm) => vm.get(spec, ctx),
+            None => Err(engine::type_error(format!(
+                "unknown jiti virtual module '{spec}'"
+            ))),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Loading
     // -----------------------------------------------------------------------
 
-    fn prepare_file(&self, ctx: &mut Context, path: &Path) -> Result<Prepared, Error> {
+    /// Read and classify a file; `jiti` is the jiti generation it loads in, if any.
+    fn prepare_file(
+        &self,
+        ctx: &mut Context,
+        path: &Path,
+        jiti: Option<u32>,
+    ) -> Result<Prepared, Error> {
         let source = self.shared.file_sources.read().get(path).cloned();
         let text = match source {
             Some(text) => text,
@@ -516,7 +845,7 @@ impl Loader {
                     _ => Format::Cjs,
                 };
                 let code = if format == Format::Esm && !in_node_modules {
-                    self.cjs_globals(&out.code, &out.declared_cjs_names)
+                    self.cjs_globals(&out.code, &out.declared_cjs_names, jiti)
                 } else {
                     out.code
                 };
@@ -535,7 +864,7 @@ impl Loader {
             }
             let out = transpile::transpile(&text, path, SourceLang::JavaScript)?;
             return Ok(Prepared {
-                code: self.cjs_globals(&text, &out.declared_cjs_names),
+                code: self.cjs_globals(&text, &out.declared_cjs_names, jiti),
                 format: Format::Esm,
             });
         }
@@ -550,7 +879,7 @@ impl Loader {
             let code = if in_node_modules {
                 text
             } else {
-                self.cjs_globals(&text, &out.declared_cjs_names)
+                self.cjs_globals(&text, &out.declared_cjs_names, jiti)
             };
             Ok(Prepared {
                 code,
@@ -622,8 +951,41 @@ impl Loader {
                     }
                 }
             }
+            Resolved::JitiVirtual(scope, spec) => {
+                // jiti hands the value out through its interop proxy; named imports read it.
+                let record = (|| {
+                    let value = self.jiti_virtual_value(ctx, *scope, spec)?;
+                    let interop = self
+                        .jiti_scopes
+                        .borrow()
+                        .get(*scope)
+                        .is_some_and(|s| s.interop_default);
+                    call_internal(ctx, "jitiVirtualRecord", &[value, JsValue::from(interop)])
+                })()
+                .map_err(|e| error::from_js(e, ctx))?;
+                self.synthetic_from_value(ctx, record, name, true)
+                    .map_err(|e| error::from_js(e, ctx))?
+            }
+            Resolved::JitiCjs(scope, path) => {
+                let record = (|| {
+                    let file = Resolved::File(path.clone());
+                    let exports =
+                        self.require_resolved_at(ctx, &file, self.generation.get(), None)?;
+                    let ns = call_internal(ctx, "jitiNodeNamespace", &[exports])?;
+                    let interop = self
+                        .jiti_scopes
+                        .borrow()
+                        .get(*scope)
+                        .is_some_and(|s| s.interop_default);
+                    call_internal(ctx, "jitiVirtualRecord", &[ns, JsValue::from(interop)])
+                })()
+                .map_err(|e| error::from_js(e, ctx))?;
+                self.synthetic_from_value(ctx, record, name, true)
+                    .map_err(|e| error::from_js(e, ctx))?
+            }
             Resolved::File(path) => {
-                let prepared = self.prepare_file(ctx, path)?;
+                let jiti = self.jiti_generation_of(name);
+                let prepared = self.prepare_file(ctx, path, jiti)?;
                 match prepared.format {
                     Format::Esm => {
                         compile_module(ctx, &prepared.code, name).map_err(|e| with_file(e, path))?
@@ -635,7 +997,7 @@ impl Loader {
                     }
                     Format::Cjs => {
                         let v = self
-                            .run_cjs(ctx, &key, path, &prepared.code)
+                            .run_cjs(ctx, &key, path, &prepared.code, jiti)
                             .map_err(|e| error::from_js(e, ctx))?;
                         self.synthetic_from_value(ctx, v, name, true)
                             .map_err(|e| error::from_js(e, ctx))?
@@ -710,7 +1072,18 @@ impl Loader {
         resolved: &Resolved,
         parent: Option<&Path>,
     ) -> JsResult<JsValue> {
-        let key = self.key(resolved);
+        self.require_resolved_at(ctx, resolved, self.generation.get(), parent)
+    }
+
+    /// [`Self::require_resolved`] in cache generation `generation`.
+    fn require_resolved_at(
+        self: &Rc<Self>,
+        ctx: &mut Context,
+        resolved: &Resolved,
+        generation: u32,
+        parent: Option<&Path>,
+    ) -> JsResult<JsValue> {
+        let key = resolved.key_at(generation);
         if let Some(m) = self.cjs.borrow().get(&key).cloned() {
             return m.get(js_string!("exports"), ctx);
         }
@@ -728,11 +1101,12 @@ impl Loader {
                 };
                 match vm {
                     VirtualModule::Esm(_) | VirtualModule::EsmJs(_) => {
-                        self.require_esm(ctx, resolved, parent)
+                        let name = self.module_name(resolved);
+                        self.require_esm(ctx, &name, parent)
                     }
                     VirtualModule::CommonJs(src) => {
                         let path = PathBuf::from(format!("virtual:{spec}"));
-                        self.run_cjs(ctx, &key, &path, &src)
+                        self.run_cjs(ctx, &key, &path, &src, None)
                     }
                     VirtualModule::Json(v) => {
                         let v = JsValue::from_json(&v, ctx)?;
@@ -757,9 +1131,15 @@ impl Loader {
                     }
                 }
             }
+            Resolved::JitiVirtual(scope, spec) => self.jiti_virtual_value(ctx, *scope, spec),
+            Resolved::JitiCjs(_, path) => {
+                let file = Resolved::File(path.clone());
+                self.require_resolved_at(ctx, &file, self.generation.get(), parent)
+            }
             Resolved::File(path) => {
+                let jiti = self.jiti_generation(generation).map(|_| generation);
                 let prepared = self
-                    .prepare_file(ctx, path)
+                    .prepare_file(ctx, path, jiti)
                     .map_err(|e| error::to_js(&e, ctx))?;
                 match prepared.format {
                     Format::Json => {
@@ -768,8 +1148,11 @@ impl Loader {
                         self.values.borrow_mut().insert(key, v.clone());
                         Ok(v)
                     }
-                    Format::Cjs => self.run_cjs(ctx, &key, path, &prepared.code),
-                    Format::Esm => self.require_esm(ctx, resolved, parent),
+                    Format::Cjs => self.run_cjs(ctx, &key, path, &prepared.code, jiti),
+                    Format::Esm => {
+                        let name = self.module_name_at(resolved, generation);
+                        self.require_esm(ctx, &name, parent)
+                    }
                 }
             }
         }
@@ -781,19 +1164,17 @@ impl Loader {
     fn require_esm(
         self: &Rc<Self>,
         ctx: &mut Context,
-        resolved: &Resolved,
+        name: &str,
         parent: Option<&Path>,
     ) -> JsResult<JsValue> {
-        let name = self.module_name(resolved);
-        let c =
-            CString::new(name.as_str()).map_err(|_| engine::type_error("invalid module name"))?;
+        let c = CString::new(name).map_err(|_| engine::type_error("invalid module name"))?;
         let raw = ctx.as_raw();
         let mut status = ext::JS_REQUIRE_MODULE_ERROR;
         // SAFETY: `raw` is this thread's live context and both names are NUL-terminated
         // strings that outlive the call; `status` is a valid out-pointer.
         let v = unsafe { ext::JS_RequireModule(raw, c"".as_ptr(), c.as_ptr(), &mut status) };
         let parent = parent.map(|p| p.display().to_string());
-        let path = module_path(&name);
+        let path = module_path(name);
         let (code, message) = match status {
             ext::JS_REQUIRE_MODULE_ASYNC => {
                 let mut message = "require() cannot be used on an ESM graph with top-level await. Use import() instead. \
@@ -827,20 +1208,23 @@ impl Loader {
         Err(error::to_js(&err, ctx))
     }
 
+    /// Run CommonJS `code`; in jiti generation `jiti`, its `require` resolves like jiti's.
     fn run_cjs(
         self: &Rc<Self>,
         ctx: &mut Context,
         key: &str,
         path: &Path,
         code: &str,
+        jiti: Option<u32>,
     ) -> JsResult<JsValue> {
         let filename = path.display().to_string();
         let create = internal(ctx).get(js_string!("createCjsModule"), ctx)?;
         let create = create
             .as_function()
             .ok_or_else(|| engine::type_error("createCjsModule missing"))?;
+        let generation = jiti.map_or_else(JsValue::undefined, JsValue::from);
         let module_obj = create
-            .call(&JsValue::undefined(), &[js_str(&filename)], ctx)?
+            .call(&JsValue::undefined(), &[js_str(&filename), generation], ctx)?
             .as_object()
             .ok_or_else(|| engine::type_error("createCjsModule returned a non-object"))?;
         self.cjs
@@ -893,7 +1277,8 @@ fn strip_shebang(text: String) -> String {
 
 /// Prefix ES module code with jiti-compatible CommonJS bindings (on line 1, so
 /// line numbers are unchanged).
-fn inject_cjs_globals(code: &str, declared: &[&str]) -> String {
+/// In jiti generation `jiti`, `require` resolves like the jiti instance's.
+fn inject_cjs_globals(code: &str, declared: &[&str], jiti: Option<u32>) -> String {
     // A hashbang must stay first; turn it into a comment so the prefix can go in front.
     let code = match code.strip_prefix("#!") {
         Some(rest) => std::borrow::Cow::Owned(format!("//{rest}")),
@@ -908,7 +1293,10 @@ fn inject_cjs_globals(code: &str, declared: &[&str]) -> String {
         prefix.push_str("const __dirname = import.meta.dirname; ");
     }
     if !declared.contains(&"require") {
-        prefix.push_str("const require = globalThis[Symbol.for(\"pi-jsrt.createRequire\")](import.meta.filename); ");
+        let generation = jiti.map(|g| format!(", {g}")).unwrap_or_default();
+        prefix.push_str(&format!(
+            "const require = globalThis[Symbol.for(\"pi-jsrt.createRequire\")](import.meta.filename{generation}); "
+        ));
     }
     if prefix.is_empty() {
         return code.to_string();
@@ -1014,7 +1402,13 @@ pub(crate) fn normalize(p: &Path) -> PathBuf {
 /// Builtins that, as in Node, exist only under the `node:` scheme (`sqlite` is an npm package).
 const PREFIX_ONLY_BUILTINS: &[&str] = &["sqlite"];
 
+/// The builtin behind the bare specifier `jiti` (not a Node builtin: `node:jiti` does not exist).
+const JITI_BUILTIN: &str = "jsrt:jiti";
+
 fn builtin_name(ctx: &mut Context, spec: &str) -> Option<String> {
+    if spec == "jiti" {
+        return Some(JITI_BUILTIN.to_string());
+    }
     let name = match spec.strip_prefix("node:") {
         Some(name) => name,
         None if PREFIX_ONLY_BUILTINS.contains(&spec) => return None,
@@ -1139,10 +1533,17 @@ unsafe extern "C" fn normalize_hook(
             return Ok(spec.clone());
         }
         let dir = base_dir_of(&ctx, &base);
+        let generation = l.generation_of(&base);
+        if let Some(jg) = l.jiti_generation(generation) {
+            let (resolved, load) = l
+                .resolve_jiti(&mut ctx, &spec, &dir, jg, jg.kind)
+                .map_err(|e| error::to_js(&e, &mut ctx))?;
+            return Ok(l.jiti_module_name(&mut ctx, &resolved, load, generation));
+        }
         let resolved = l
             .resolve(&mut ctx, &spec, &dir, Kind::Import)
             .map_err(|e| error::to_js(&e, &mut ctx))?;
-        Ok::<_, JsError>(l.module_name_at(&resolved, l.generation_of(&base)))
+        Ok::<_, JsError>(l.module_name_at(&resolved, generation))
     }));
     match r {
         Ok(Ok(resolved)) => {
@@ -1342,7 +1743,7 @@ pub(crate) fn module_from_source(
             .insert(path.display().to_string(), map);
     }
     let l = loader(ctx);
-    let code = l.cjs_globals(&out.code, &out.declared_cjs_names);
+    let code = l.cjs_globals(&out.code, &out.declared_cjs_names, None);
     // A name QuickJS already loaded would return that module: use a fresh one.
     let mut name = path.display().to_string();
     if l.loaded.borrow().contains(&name) || l.sources.borrow().contains_key(&name) {
@@ -1393,10 +1794,249 @@ pub(crate) fn clear_file_cache(ctx: &mut Context) {
     loader(ctx).clear_files();
 }
 
+/// `ops.require(specifier, parent, jitiGeneration?)`.
 fn op_require(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let spec = arg_string(args, 0, ctx)?;
     let parent = arg_opt_string(args, 1, ctx)?;
-    require(ctx, &spec, parent.as_deref().map(Path::new))
+    let parent = parent.as_deref().map(Path::new);
+    match arg_generation(args, 2) {
+        Some(generation) => loader(ctx).jiti_require(ctx, generation, &spec, parent),
+        None => require(ctx, &spec, parent),
+    }
+}
+
+/// An optional generation number argument.
+fn arg_generation(args: &[JsValue], i: usize) -> Option<u32> {
+    let n = args.get_or_undefined(i).as_number()?;
+    (n >= 0.0 && n <= f64::from(u32::MAX) && n.fract() == 0.0).then_some(n as u32)
+}
+
+/// Call `internal[name](...args)`.
+fn call_internal(ctx: &mut Context, name: &str, args: &[JsValue]) -> JsResult<JsValue> {
+    let f = internal(ctx).get(name, ctx)?;
+    let f = f
+        .as_function()
+        .ok_or_else(|| engine::type_error(format!("internal.{name} missing")))?;
+    f.call(&JsValue::undefined(), args, ctx)
+}
+
+/// jiti's `resolveAlias` for instance `scope` (pathe's alias rules live in `js/jiti.js`).
+fn jiti_alias(ctx: &mut Context, scope: usize, spec: &str) -> JsResult<String> {
+    let scope = u32::try_from(scope).map_err(|_| engine::type_error("jiti instance index"))?;
+    let v = call_internal(ctx, "jitiAlias", &[JsValue::from(scope), js_str(spec)])?;
+    Ok(v.to_string(ctx)?.to_std_string_lossy())
+}
+
+/// Whether `path` lies in one of the `node_modules` packages `names` (jiti's `isNativeRe` /
+/// `isTransformRe`).
+fn in_packages(path: &Path, names: &[String]) -> bool {
+    let path = path.to_string_lossy();
+    names
+        .iter()
+        .any(|name| path.contains(&format!("node_modules/{name}/")))
+}
+
+/// `ops.jitiCreate(virtualModules, config)`: register a `createJiti` instance; returns its index.
+/// `config` is JSON: `{ hasAlias, interopDefault, nativeModules, transformModules }`.
+fn op_jiti_create(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let virtual_modules = args.get_or_undefined(0).as_object();
+    let config = arg_string(args, 1, ctx)?;
+    let config: Value = serde_json::from_str(&config)
+        .map_err(|e| engine::type_error(format!("invalid jiti config: {e}")))?;
+    let flag = |k: &str| config.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let names = |k: &str| -> Vec<String> {
+        config
+            .get(k)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let scope = JitiScope {
+        virtual_modules,
+        has_alias: flag("hasAlias"),
+        interop_default: flag("interopDefault"),
+        native_modules: names("nativeModules"),
+        transform_modules: names("transformModules"),
+        cached: [None, None],
+    };
+    let l = loader(ctx);
+    let mut scopes = l.jiti_scopes.borrow_mut();
+    scopes.push(scope);
+    let index = u32::try_from(scopes.len() - 1)
+        .map_err(|_| engine::type_error("too many jiti instances"))?;
+    Ok(JsValue::from(index))
+}
+
+/// `ops.jitiGeneration(scope, isImport, moduleCache)`: the generation one `jiti.import` (or
+/// `jiti()`) loads in: a new one per call, or the instance's own while `moduleCache` is on.
+fn op_jiti_generation(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let scope = args.get_or_undefined(0).to_u32(ctx)? as usize;
+    let kind = if args.get_or_undefined(1).to_boolean() {
+        Kind::Import
+    } else {
+        Kind::Require
+    };
+    let reuse = args.get_or_undefined(2).to_boolean();
+    let l = loader(ctx);
+    let slot = usize::from(kind == Kind::Import);
+    let cached = l
+        .jiti_scopes
+        .borrow()
+        .get(scope)
+        .ok_or_else(|| engine::type_error(format!("unknown jiti instance {scope}")))?
+        .cached[slot];
+    if reuse && let Some(generation) = cached {
+        return Ok(JsValue::from(generation));
+    }
+    let generation = l.new_generation();
+    l.jiti_generations
+        .borrow_mut()
+        .insert(generation, JitiGeneration { scope, kind });
+    if reuse && let Some(s) = l.jiti_scopes.borrow_mut().get_mut(scope) {
+        s.cached[slot] = Some(generation);
+    }
+    Ok(JsValue::from(generation))
+}
+
+/// `ops.jitiRequire(generation, specifier, parent)`: jiti's synchronous load.
+fn op_jiti_require(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let generation =
+        arg_generation(args, 0).ok_or_else(|| engine::type_error("jiti generation"))?;
+    let spec = arg_string(args, 1, ctx)?;
+    let parent = arg_opt_string(args, 2, ctx)?;
+    loader(ctx).jiti_require(ctx, generation, &spec, parent.as_deref().map(Path::new))
+}
+
+/// `ops.jitiTarget(generation, specifier, parent)`: what `jiti.import` loads: `{ virtual: true }`
+/// for a virtual module, `{ cjs: path }` for a CommonJS file (imported natively), else
+/// `{ name, transpiled?, fallback? }`, module names for `import()`;
+/// `fallback` is the transpiled load to use when the native import of `name` fails.
+fn op_jiti_target(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let generation =
+        arg_generation(args, 0).ok_or_else(|| engine::type_error("jiti generation"))?;
+    let spec = arg_string(args, 1, ctx)?;
+    let parent = arg_opt_string(args, 2, ctx)?;
+    let l = loader(ctx);
+    let jg = l
+        .jiti_generation(generation)
+        .ok_or_else(|| engine::type_error(format!("unknown jiti generation {generation}")))?;
+    let base = referrer_dir(ctx, parent.as_deref().map(Path::new));
+    let (resolved, load) = l
+        .resolve_jiti(ctx, &spec, &base, jg, Kind::Import)
+        .map_err(|e| error::to_js(&e, ctx))?;
+    let out = JsObject::with_null_proto();
+    match &resolved {
+        Resolved::JitiVirtual(..) => {
+            out.set("virtual", true, true, ctx)?;
+            return Ok(out.into());
+        }
+        Resolved::JitiCjs(_, path) => {
+            out.set("cjs", js_str(&path.display().to_string()), true, ctx)?;
+            return Ok(out.into());
+        }
+        _ => {}
+    }
+    let current = l.generation.get();
+    let (name, fallback) = match load {
+        JitiLoad::Native => (l.module_name_at(&resolved, current), None),
+        JitiLoad::Transpile => {
+            out.set("transpiled", true, true, ctx)?;
+            (l.module_name_at(&resolved, generation), None)
+        }
+        JitiLoad::TryNative => (
+            l.module_name_at(&resolved, current),
+            Some(l.module_name_at(&resolved, generation)),
+        ),
+    };
+    out.set("name", js_str(&name), true, ctx)?;
+    if let Some(fallback) = fallback {
+        out.set("fallback", js_str(&fallback), true, ctx)?;
+    }
+    Ok(out.into())
+}
+
+/// `ops.jitiResolve(scope, specifier, parent, isImport)`: jiti's `jitiResolve` (aliases, then
+/// the regular resolution; virtual modules are not consulted, as in jiti).
+fn op_jiti_resolve(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let scope = args.get_or_undefined(0).to_u32(ctx)? as usize;
+    let spec = arg_string(args, 1, ctx)?;
+    let parent = arg_opt_string(args, 2, ctx)?;
+    let kind = if args.get_or_undefined(3).to_boolean() {
+        Kind::Import
+    } else {
+        Kind::Require
+    };
+    let l = loader(ctx);
+    let has_alias = l
+        .jiti_scopes
+        .borrow()
+        .get(scope)
+        .is_some_and(|s| s.has_alias);
+    let spec = if has_alias {
+        jiti_alias(ctx, scope, &spec)?
+    } else {
+        spec
+    };
+    let base = referrer_dir(ctx, parent.as_deref().map(Path::new));
+    let resolved = l
+        .resolve_either(ctx, &spec, &base, kind)
+        .map_err(|e| error::to_js(&e, ctx))?;
+    Ok(js_str(&resolved_specifier(&resolved)))
+}
+
+/// `ops.jitiEval(generation, source, filename)`: jiti's `evalModule`. ES module source returns
+/// `{ name }` (load it with `import()` or `ops.jitiRequireModule`), CommonJS `{ exports }`.
+fn op_jiti_eval(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let generation =
+        arg_generation(args, 0).ok_or_else(|| engine::type_error("jiti generation"))?;
+    let source = arg_string(args, 1, ctx)?;
+    let filename = arg_string(args, 2, ctx)?;
+    let l = loader(ctx);
+    if l.jiti_generation(generation).is_none() {
+        return Err(engine::type_error(format!(
+            "unknown jiti generation {generation}"
+        )));
+    }
+    let path = normalize(&state(ctx).cwd.borrow().join(&filename));
+    let out = transpile::transpile(&source, &path, SourceLang::from_path(&path))
+        .map_err(|e| error::to_js(&e, ctx))?;
+    if let Some(map) = out.source_map {
+        state(ctx)
+            .source_maps
+            .borrow_mut()
+            .insert(path.display().to_string(), map);
+    }
+    l.evals.set(l.evals.get() + 1);
+    let name = format!(
+        "{}{EVAL_MARK}{}{RELOAD_MARK}{generation}",
+        path.display(),
+        l.evals.get()
+    );
+    let esm = match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "mjs" | "mts" => true,
+        "cjs" | "cts" => false,
+        _ => out.has_module_syntax,
+    };
+    let result = JsObject::with_null_proto();
+    if esm {
+        let code = l.cjs_globals(&out.code, &out.declared_cjs_names, Some(generation));
+        l.sources.borrow_mut().insert(name.clone(), code);
+        result.set("name", js_str(&name), true, ctx)?;
+    } else {
+        let exports = l.run_cjs(ctx, &name, &path, &out.code, Some(generation))?;
+        result.set("exports", exports, true, ctx)?;
+    }
+    Ok(result.into())
+}
+
+/// `ops.jitiRequireModule(name)`: evaluate the ES module named `name` synchronously (`require`).
+fn op_jiti_require_module(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, ctx)?;
+    loader(ctx).require_esm(ctx, &name, None)
 }
 
 fn op_require_resolve(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -1409,20 +2049,20 @@ fn op_require_resolve(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRes
     };
     let l = loader(ctx);
     let base = referrer_dir(ctx, parent.as_deref().map(Path::new));
-    match l
+    let resolved = l
         .resolve(ctx, &spec, &base, kind)
-        .map_err(|e| error::to_js(&e, ctx))?
-    {
-        Resolved::Builtin(n) => Ok(js_str(
-            if n.starts_with("jsrt:") {
-                n.clone()
-            } else {
-                format!("node:{n}")
-            }
-            .as_str(),
-        )),
-        Resolved::Virtual(s) => Ok(js_str(&s)),
-        Resolved::File(p) => Ok(js_str(&p.display().to_string())),
+        .map_err(|e| error::to_js(&e, ctx))?;
+    Ok(js_str(&resolved_specifier(&resolved)))
+}
+
+/// What `require.resolve` reports for a resolved module.
+fn resolved_specifier(resolved: &Resolved) -> String {
+    match resolved {
+        Resolved::Builtin(n) if n == JITI_BUILTIN => "jiti".to_string(),
+        Resolved::Builtin(n) if n.starts_with("jsrt:") => n.clone(),
+        Resolved::Builtin(n) => format!("node:{n}"),
+        Resolved::Virtual(s) | Resolved::JitiVirtual(_, s) => s.clone(),
+        Resolved::File(p) | Resolved::JitiCjs(_, p) => p.display().to_string(),
     }
 }
 
@@ -1468,7 +2108,7 @@ fn op_is_common_js(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
         return Ok(JsValue::from(false));
     };
     let cjs = l
-        .prepare_file(ctx, &resolved)
+        .prepare_file(ctx, &resolved, None)
         .is_ok_and(|p| p.format == Format::Cjs);
     Ok(JsValue::from(cjs))
 }
@@ -1488,6 +2128,13 @@ pub(crate) const LOADER_OPS: &[(&str, usize, engine::OpFn)] = &[
     ("chdir", 1, op_set_cwd),
     ("cwd", 0, op_get_cwd),
     ("transpile", 2, op_transpile),
+    ("jitiCreate", 2, op_jiti_create),
+    ("jitiGeneration", 3, op_jiti_generation),
+    ("jitiRequire", 3, op_jiti_require),
+    ("jitiTarget", 3, op_jiti_target),
+    ("jitiResolve", 4, op_jiti_resolve),
+    ("jitiEval", 3, op_jiti_eval),
+    ("jitiRequireModule", 1, op_jiti_require_module),
 ];
 
 #[cfg(test)]
@@ -1547,7 +2194,7 @@ mod tests {
 
     #[test]
     fn injection_skips_declared() {
-        let out = inject_cjs_globals("x", &["require"]);
+        let out = inject_cjs_globals("x", &["require"], None);
         assert!(out.contains("__filename"));
         assert!(!out.contains("const require"));
     }

@@ -525,3 +525,302 @@ export async function lazyRead() { const m = await import("./reader.mjs"); retur
         json!(1)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Embedded `jiti` (js/jiti.js)
+// ---------------------------------------------------------------------------
+
+const NODE_BIN: &str = env!("CARGO_BIN_EXE_pi-jsrt-node");
+
+const SDK_SPEC: &str = "@earendil-works/pi-coding-agent";
+
+/// The pi-subagents runner bootstrap pattern: `createJiti(import.meta.url, { tryNative: false,
+/// moduleCache: false, virtualModules: { sdk } }).import("./x.ts")` gives the TS module (and the
+/// modules it imports) the host's SDK object itself, whether or not the runtime knows the SDK
+/// specifier.
+#[tokio::test]
+async fn jiti_virtual_modules_keep_sdk_identity() {
+    for host_registers_sdk in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "x.ts",
+            r#"
+import * as ns from "@earendil-works/pi-coding-agent";
+import sdkDefault, { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { helper } from "./helper.ts";
+let session: AgentSession | undefined = undefined;
+export const seen = { createAgentSession, sdkDefault, viaNamespace: ns.createAgentSession, helper, session };
+"#,
+        );
+        write(
+            root,
+            "helper.ts",
+            "import { createAgentSession } from '@earendil-works/pi-coding-agent';\nexport const helper = createAgentSession;\n",
+        );
+        write(
+            root,
+            "sdk.mjs",
+            "export function createAgentSession() { return 'session'; }\nexport const VERSION = '1.4.0';\n",
+        );
+        let sdk_import = if host_registers_sdk {
+            SDK_SPEC
+        } else {
+            "./sdk.mjs"
+        };
+        write(
+            root,
+            "bootstrap.mjs",
+            &format!(
+                r#"
+import {{ createJiti }} from "jiti";
+import * as sdk from "{sdk_import}";
+const jiti = createJiti(import.meta.url, {{
+  tryNative: false,
+  moduleCache: false,
+  virtualModules: {{ "{SDK_SPEC}": sdk }},
+}});
+const a = await jiti.import("./x.ts");
+const b = await jiti.import("./x.ts");
+export default {{
+  named: a.seen.createAgentSession === sdk.createAgentSession,
+  namespaceProperty: a.seen.viaNamespace === sdk.createAgentSession,
+  nested: a.seen.helper === sdk.createAgentSession,
+  defaultIsSdk: a.seen.sdkDefault === sdk,
+  freshPerImport: a.seen !== b.seen,
+  call: a.seen.createAgentSession(),
+}};
+"#
+            ),
+        );
+        let mut virtual_modules = HashMap::new();
+        if host_registers_sdk {
+            virtual_modules.insert(
+                SDK_SPEC.to_string(),
+                VirtualModule::EsmJs(std::fs::read_to_string(root.join("sdk.mjs")).unwrap()),
+            );
+        }
+        let rt = JsRuntime::new(RuntimeOptions {
+            cwd: Some(root.to_path_buf()),
+            virtual_modules,
+            ..Default::default()
+        })
+        .unwrap();
+        let ns = rt
+            .import("./bootstrap.mjs")
+            .await
+            .unwrap_or_else(|e| panic!("{e}\n{:?}", e.as_js().and_then(|j| j.stack.clone())));
+        assert_eq!(
+            ns.get("default").await.unwrap(),
+            json!({
+                "named": true, "namespaceProperty": true, "nested": true, "defaultIsSdk": true,
+                "freshPerImport": true, "call": "session",
+            }),
+            "host registers the SDK: {host_registers_sdk}"
+        );
+    }
+}
+
+/// `jiti` is a builtin that beats `node_modules`: an installed npm jiti (and its Babel bundle) is
+/// never read, for `import`, `require` and nested loads alike. `node:jiti` is not a builtin.
+#[tokio::test]
+async fn jiti_builtin_never_loads_npm_jiti_or_babel() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let poison = "globalThis.__npmJitiLoaded = (globalThis.__npmJitiLoaded || []).concat(__filename); throw new Error('npm jiti loaded');\n";
+    write(
+        root,
+        "node_modules/jiti/package.json",
+        r#"{ "name": "jiti", "version": "2.7.0", "main": "./lib/jiti.cjs",
+             "exports": { ".": { "import": "./lib/jiti.mjs", "require": "./lib/jiti.cjs" } } }"#,
+    );
+    write(root, "node_modules/jiti/lib/jiti.cjs", poison);
+    write(
+        root,
+        "node_modules/jiti/lib/jiti.mjs",
+        "throw new Error('npm jiti loaded');\n",
+    );
+    write(root, "node_modules/jiti/dist/babel.cjs", poison);
+    write(root, "node_modules/jiti/dist/jiti.cjs", poison);
+    write(
+        root,
+        "a.ts",
+        "import { createJiti } from 'jiti';\nexport const a: string = typeof createJiti;\n",
+    );
+    write(
+        root,
+        "main.mjs",
+        r#"
+import { createJiti } from "jiti";
+import createDefault from "jiti";
+import { builtinModules } from "node:module";
+const required = require("jiti");
+const jiti = createJiti(import.meta.url);
+const imported = await jiti.import("./a.ts");
+const sync = jiti("./a.ts");
+let nodePrefixed;
+try {
+  await import("node:jiti");
+  nodePrefixed = "resolved";
+} catch (err) {
+  nodePrefixed = "not found";
+}
+export default {
+  npm: globalThis.__npmJitiLoaded ?? null,
+  babelInCache: Object.keys(require.cache).filter((k) => k.includes("babel") || k.includes("node_modules/jiti")),
+  shape: [typeof createJiti, createDefault === createJiti, typeof required, required.createJiti === createJiti],
+  imported: imported.a,
+  sync: sync.a,
+  nodePrefixed,
+  listedAsNodeBuiltin: builtinModules.includes("jiti"),
+  resolve: require.resolve("jiti"),
+};
+"#,
+    );
+    let rt = JsRuntime::new(options(root)).unwrap();
+    let ns = rt
+        .import("./main.mjs")
+        .await
+        .unwrap_or_else(|e| panic!("{e}\n{:?}", e.as_js().and_then(|j| j.stack.clone())));
+    assert_eq!(
+        ns.get("default").await.unwrap(),
+        json!({
+            "npm": null, "babelInCache": [], "shape": ["function", true, "function", true],
+            "imported": "function", "sync": "function", "nodePrefixed": "not found",
+            "listedAsNodeBuiltin": false, "resolve": "jiti",
+        })
+    );
+}
+
+/// `moduleCache`, `tryNative`, `evalModule`, `alias` on `require`, `try`, and options that need
+/// jiti's Babel pipeline (a named error instead of a silently different result).
+#[tokio::test]
+async fn jiti_options_and_unsupported_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "counter.ts",
+        "export const state: { n: number } = { n: 0 };\nstate.n += 1;\n",
+    );
+    write(
+        root,
+        "uses-virtual.ts",
+        "import { tag } from 'virtual-only';\nexport const tag2: string = tag + '!';\n",
+    );
+    write(root, "lib/value.ts", "export const value = 'aliased';\n");
+    write(
+        root,
+        "cjs-ts.ts",
+        "const { value } = require('#lib/value');\nmodule.exports = { value, kind: typeof require };\n",
+    );
+    write(
+        root,
+        "main.mjs",
+        r##"
+import { createJiti } from "jiti";
+import * as path from "node:path";
+const dir = path.dirname(import.meta.filename);
+const out = {};
+for (const [option, value] of [
+  ["transform", () => ({ code: "" })],
+  ["transformOptions", {}],
+  ["jsx", true],
+  ["tsconfigPaths", true],
+  ["extensions", [".ts"]],
+]) {
+  try {
+    createJiti(import.meta.url, { [option]: value });
+    out[option] = "accepted";
+  } catch (err) {
+    out[option] = `${err.name} ${err.code} ${err.option}`;
+  }
+}
+const cached = createJiti(import.meta.url, { moduleCache: true });
+out.cachedShares = (await cached.import("./counter.ts")).state === (await cached.import("./counter.ts")).state;
+const fresh = createJiti(import.meta.url, { moduleCache: false });
+const first = await fresh.import("./counter.ts");
+out.freshDiffers = first.state !== (await fresh.import("./counter.ts")).state;
+out.freshCount = first.state.n;
+const native = await import("./counter.ts");
+const tryNative = createJiti(import.meta.url, { tryNative: true, moduleCache: false, virtualModules: { "virtual-only": { tag: "v" } } });
+out.tryNativeShares = (await tryNative.import("./counter.ts")).state === native.state;
+out.tryNativeFallback = (await tryNative.import("./uses-virtual.ts")).tag2;
+out.evalCjs = fresh.evalModule("module.exports = { v: 1 + 1 };", { filename: path.join(dir, "e.cjs") }).v;
+out.evalEsm = fresh.evalModule("import { state } from './counter.ts'; export const v: number = state.n + 2;", { filename: path.join(dir, "e.ts") }).v;
+out.evalAsync = (await fresh.evalModule("export default 4;", { filename: path.join(dir, "e2.mjs"), async: true })).default;
+try {
+  fresh.transform({ source: "" });
+  out.transform = "returned";
+} catch (err) {
+  out.transform = err.name;
+}
+const aliased = createJiti(import.meta.url, { alias: { "#lib": path.join(dir, "lib") } });
+out.requireAlias = aliased("./cjs-ts.ts");
+out.tryMissing = (await fresh.import("./missing", { try: true })) ?? null;
+export default out;
+"##,
+    );
+    let rt = JsRuntime::new(options(root)).unwrap();
+    let ns = rt
+        .import("./main.mjs")
+        .await
+        .unwrap_or_else(|e| panic!("{e}\n{:?}", e.as_js().and_then(|j| j.stack.clone())));
+    let unsupported =
+        |option: &str| format!("JitiUnsupportedOptionError ERR_JITI_UNSUPPORTED_OPTION {option}");
+    assert_eq!(
+        ns.get("default").await.unwrap(),
+        json!({
+            "transform": unsupported("transform"),
+            "transformOptions": unsupported("transformOptions"),
+            "jsx": unsupported("jsx"),
+            "tsconfigPaths": unsupported("tsconfigPaths"),
+            "extensions": unsupported("extensions"),
+            "cachedShares": true, "freshDiffers": true, "freshCount": 1,
+            "tryNativeShares": true, "tryNativeFallback": "v!",
+            "evalCjs": 2, "evalEsm": 3, "evalAsync": 4, "transform": "JitiUnsupportedOptionError",
+            "requireAlias": { "value": "aliased", "kind": "function" },
+            "tryMissing": null,
+        })
+    );
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The differential fixtures (ESM, CJS, TS, default interop, alias, virtual) give exactly what npm
+/// jiti 2.7.0 gives under Node (`tests/fixtures/jiti/expected.json`, recorded with
+/// `tests/fixtures/jiti/jiti-differential.sh`).
+#[test]
+fn jiti_differential_fixtures_match_npm_jiti() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jiti");
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures, dir.path());
+    let out = std::process::Command::new(NODE_BIN)
+        .arg("run.mjs")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "run.mjs failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join("expected.json")).unwrap())
+            .unwrap();
+    assert_eq!(got, want);
+}
