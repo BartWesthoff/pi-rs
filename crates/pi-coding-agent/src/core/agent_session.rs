@@ -1154,10 +1154,7 @@ impl AgentSession {
             });
         }
         if self.model_runtime.is_using_o_auth(&model.provider) {
-            return Err(err(format!(
-                "Authentication failed for \"{0}\". Credentials may have expired or network is unavailable. Run '/login {0}' to re-authenticate.",
-                model.provider
-            )));
+            return Err(err(crate::core::model_runtime::format_oauth_relogin_message(&model.provider)));
         }
         Err(err(format_no_api_key_found_message(&model.provider)))
     }
@@ -3730,8 +3727,8 @@ impl AgentSession {
             if !has_configured_auth {
                 if self.model_runtime.is_using_o_auth(&model.provider) {
                     anyhow::bail!(
-                        "Authentication failed for \"{0}\". Credentials may have expired or network is unavailable. Run '/login {0}' to re-authenticate.",
-                        model.provider
+                        "{}",
+                        crate::core::model_runtime::format_oauth_relogin_message(&model.provider)
                     );
                 }
                 anyhow::bail!("{}", format_no_api_key_found_message(&model.provider));

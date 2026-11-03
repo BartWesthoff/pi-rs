@@ -138,6 +138,20 @@ Behavior that still differs from TypeScript pi, and why:
   literally instead of failing in `fileURLToPath`.
 - **Extension API details.** `ctx.getSystemPromptOptions()` returns a copy, so mutating it outside
   `before_agent_start` does not change later turns as mutating TypeScript's live object would.
+- **Provider error handling beyond TypeScript.** Three deliberate additions:
+  - A request to a loopback base URL (`localhost`, `127.0.0.0/8`, `::1`) whose connection is
+    refused fails with `Connection refused: 127.0.0.1:8084 (no server is listening; is the local
+    server running?)` instead of the SDKs' `Connection error.`, and is not retried, neither by the
+    SDK retry policy nor by auto-retry: nothing listens on that port, and a local server takes
+    longer to start than the ~14 s the default backoff waits. Other hosts and other connection
+    failures keep the SDK message and retries.
+  - A `usage_limit_reached` `error` event on the Codex WebSocket reads `You have hit your ChatGPT
+    usage limit (<plan> plan). Try again in ~N min.`, as the HTTP (SSE) path already does in
+    TypeScript, instead of `Codex error: <message>`.
+  - When the Codex backend answers HTTP 401 before any output to a request signed in with
+    stored OAuth credentials, the credential is refreshed once (through the usual locked refresh,
+    which skips it when another process already rotated the token) and the request is repeated
+    once. A second 401, or a failed refresh, ends with the `/login` message.
 - **Unverified.** The Bedrock error text when a stream is aborted mid-response (HTTP/2 close) has
   not been compared with the AWS SDK.
 

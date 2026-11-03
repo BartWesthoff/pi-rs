@@ -997,3 +997,26 @@ async fn keep_alive_comment_frames_do_not_change_the_stream_at_any_byte_split() 
         assert_eq!(event_trace(&events), reference_trace, "split at {size} bytes");
     }
 }
+
+/// pi-rs divergence (LM-04): a local server that is not running (a closed loopback port) fails
+/// at once with its address instead of the SDK's bare "Connection error." after retries.
+#[tokio::test]
+async fn closed_loopback_port_names_the_address_without_retrying() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let model = custom_model(&format!("http://{address}/v1"));
+    // The SDK retry policy would back off 0.5 s and 1 s before giving up on a connection error.
+    let options = StreamOptions { api_key: Some("sk-local".into()), max_retries: Some(2), ..Default::default() };
+    let started = std::time::Instant::now();
+    let result = openai_completions::stream_simple(&model, &context(), options).result().await;
+    let elapsed = started.elapsed();
+    assert_eq!(result.stop_reason, StopReason::Error);
+    assert_eq!(
+        result.error_message.as_deref(),
+        Some(format!("Connection refused: {address} (no server is listening; is the local server running?)").as_str())
+    );
+    assert!(elapsed < std::time::Duration::from_millis(400), "retried before failing: {elapsed:?}");
+    // The agent's auto-retry does not wait out its backoff either.
+    assert!(!pi_ai::utils::retry::is_retryable_assistant_error(&result));
+}
