@@ -423,6 +423,8 @@ struct JSRuntime {
     JSSharedArrayBufferFunctions sab_funcs;
 
     bool can_block; /* true if Atomics.wait can block */
+    /* set by JS_InterruptAtomicsWait (under js_atomics_mutex): Atomics.wait throws */
+    bool atomics_interrupted;
     uint32_t dump_flags : 24;
 
     /* Shape hash table */
@@ -62884,9 +62886,11 @@ typedef struct JSAtomicsWaiter {
     bool linked;
     js_cond_t cond;
     int32_t *ptr;
+    JSRuntime *rt;
 } JSAtomicsWaiter;
 
 static js_once_t js_atomics_once = JS_ONCE_INIT;
+static void js__atomics_init(void);
 static js_mutex_t js_atomics_mutex;
 static struct list_head js_atomics_waiter_list =
     LIST_HEAD_INIT(js_atomics_waiter_list);
@@ -62963,6 +62967,11 @@ static JSValue js_atomics_wait(JSContext *ctx,
     /* XXX: inefficient if large number of waiters, should hash on
        'ptr' value */
     js_mutex_lock(&js_atomics_mutex);
+    if (ctx->rt->atomics_interrupted) {
+        js_mutex_unlock(&js_atomics_mutex);
+        JS_ThrowInterrupted(ctx);
+        return JS_EXCEPTION;
+    }
     if (size_log2 == 3) {
         res = *(int64_t *)ptr != v;
     } else {
@@ -62975,6 +62984,7 @@ static JSValue js_atomics_wait(JSContext *ctx,
 
     waiter = &waiter_s;
     waiter->ptr = ptr;
+    waiter->rt = ctx->rt;
     js_cond_init(&waiter->cond);
     waiter->linked = true;
     list_add_tail(&waiter->link, &js_atomics_waiter_list);
@@ -62987,8 +62997,13 @@ static JSValue js_atomics_wait(JSContext *ctx,
     }
     if (waiter->linked)
         list_del(&waiter->link);
+    res = ctx->rt->atomics_interrupted;
     js_mutex_unlock(&js_atomics_mutex);
     js_cond_destroy(&waiter->cond);
+    if (res) {
+        JS_ThrowInterrupted(ctx);
+        return JS_EXCEPTION;
+    }
     if (ret == -1) {
         return JS_AtomToString(ctx, JS_ATOM_timed_out);
     } else {
@@ -63050,6 +63065,25 @@ static JSValue js_atomics_notify(JSContext *ctx,
         js_mutex_unlock(&js_atomics_mutex);
     }
     return js_int32(n);
+}
+
+void JS_InterruptAtomicsWait(JSRuntime *rt)
+{
+    struct list_head *el, *el1;
+    JSAtomicsWaiter *waiter;
+
+    js_once(&js_atomics_once, js__atomics_init);
+    js_mutex_lock(&js_atomics_mutex);
+    rt->atomics_interrupted = true;
+    list_for_each_safe(el, el1, &js_atomics_waiter_list) {
+        waiter = list_entry(el, JSAtomicsWaiter, link);
+        if (waiter->rt == rt) {
+            list_del(&waiter->link);
+            waiter->linked = false;
+            js_cond_signal(&waiter->cond);
+        }
+    }
+    js_mutex_unlock(&js_atomics_mutex);
 }
 
 static const JSCFunctionListEntry js_atomics_funcs[] = {

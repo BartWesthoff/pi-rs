@@ -74,9 +74,12 @@ function serializeMessage(message, transferList, source) {
     } else if (t instanceof ArrayBuffer) {
       if (seenBuffers.has(t)) throw dataCloneError("Transfer list contains duplicate ArrayBuffer");
       seenBuffers.add(t);
+    } else if (t instanceof SharedArrayBuffer) {
+      // Shared memory is shared by being cloned; it cannot be transferred.
+      throw dataCloneError("Found invalid value in transferList.");
     }
   }
-  const { bytes, ports, buffers } = internal.cloneSerialize(message, transferList, {
+  const { bytes, ports, buffers, sabs } = internal.cloneSerialize(message, transferList, {
     isHost: (v) => v instanceof MessagePort,
     writeHost(v, ids) {
       if (!transferPorts.includes(v)) throw dataCloneError("Object that needs transfer was found in message but not listed in transferList");
@@ -87,7 +90,7 @@ function serializeMessage(message, transferList, source) {
   });
   for (const p of transferPorts) if (!ports.includes(p._id)) ports.push(p._id);
   for (const p of transferPorts) p._detach();
-  return { bytes, ports, buffers };
+  return { bytes, ports, buffers, sabs };
 }
 
 function adoptPort(id) {
@@ -98,9 +101,9 @@ function adoptPort(id) {
   return port;
 }
 
-function deserializeMessage(bytes, portIds, buffers) {
+function deserializeMessage(bytes, portIds, buffers, sabs) {
   const ports = portIds.map(adoptPort);
-  const data = internal.cloneDeserialize(bytes, buffers, { readHost: (i) => ports[i] });
+  const data = internal.cloneDeserialize(bytes, buffers, { readHost: (i) => ports[i] }, sabs);
   return { data, ports };
 }
 internal.serializeMessage = serializeMessage;
@@ -141,15 +144,15 @@ class MessagePort extends EventTarget {
   postMessage(message, transfer) {
     if (this.#closed || this.#detached) return;
     const transferList = Array.isArray(transfer) ? transfer : transfer?.transfer;
-    const { bytes, ports, buffers } = serializeMessage(message, transferList, this);
-    ops.portSend(this.#id, bytes, ports, buffers);
+    const { bytes, ports, buffers, sabs } = serializeMessage(message, transferList, this);
+    ops.portSend(this.#id, bytes, ports, buffers, sabs);
   }
   // Deliver one raw message from the registry queue.
   _deliver(raw) {
-    const [bytes, portIds, buffers] = raw;
+    const [bytes, portIds, buffers, sabs] = raw;
     let msg;
     try {
-      msg = deserializeMessage(bytes, portIds, buffers);
+      msg = deserializeMessage(bytes, portIds, buffers, sabs);
     } catch (error) {
       this.dispatchEvent(new MessageEvent("messageerror", { data: error }));
       return;
@@ -166,8 +169,8 @@ class MessagePort extends EventTarget {
   _receiveOne() {
     const raw = ops.portRecv(this.#id);
     if (raw === undefined) return undefined;
-    const [bytes, portIds, buffers] = raw;
-    return { message: deserializeMessage(bytes, portIds, buffers).data };
+    const [bytes, portIds, buffers, sabs] = raw;
+    return { message: deserializeMessage(bytes, portIds, buffers, sabs).data };
   }
   _onClose() {
     if (this.#closed) return;

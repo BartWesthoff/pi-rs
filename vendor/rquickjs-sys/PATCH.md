@@ -99,3 +99,17 @@ flag is now cleared before the module is marked evaluated.
 
 Regression coverage:
 `crates/pi-jsrt/tests/engine_regressions.rs::import_after_async_graph_settles_does_not_wait_on_evaluated_modules`.
+
+## Interrupting `Atomics.wait` (`JS_InterruptAtomicsWait`)
+
+pi-jsrt lets every runtime block in `Atomics.wait` (`JS_SetCanBlock`, as Node does on the main
+thread too), but a thread blocked without a timeout never returned to its event loop, so
+`worker.terminate()` or a runtime shutdown could not stop it. `JS_InterruptAtomicsWait(rt)` (callable
+from any thread while `rt` is alive) marks the runtime under the Atomics mutex and signals its
+waiters (each waiter now records its runtime); the woken `Atomics.wait`, and every later one in that
+runtime, throws the uncatchable "interrupted" error of the interrupt handler, so the stack unwinds
+to the event loop, which then sees the shutdown.
+
+Regression coverage: `crates/pi-jsrt/tests/atomics.rs`
+(`terminate_wakes_a_blocked_worker_and_a_crashed_worker_times_out`,
+`embedded_runtimes_block_in_wait_and_shutdown_wakes_them`).

@@ -165,9 +165,52 @@ pub(crate) struct Shared {
     pub(crate) file_sources: RwLock<HashMap<PathBuf, String>>,
     pub(crate) env: HashMap<String, String>,
     pub(crate) cwd: PathBuf,
+    /// Wakes the JS thread out of `Atomics.wait` on shutdown.
+    atomics: Mutex<AtomicsGate>,
+}
+
+/// Detaches the engine from [`Shared::interrupt_atomics`] when dropped.
+pub(crate) struct AtomicsAttached<'a>(&'a Shared);
+
+impl Drop for AtomicsAttached<'_> {
+    fn drop(&mut self) {
+        self.0.atomics.lock().rt = None;
+    }
+}
+
+/// The QuickJS runtime of the JS thread while it runs, so that a shutdown from another thread can
+/// wake it out of a blocking `Atomics.wait` (as `worker.terminate()` does in Node).
+#[derive(Default)]
+struct AtomicsGate {
+    /// The raw `JSRuntime` address while the engine is alive.
+    rt: Option<usize>,
+    interrupted: bool,
 }
 
 impl Shared {
+    /// The JS thread's engine is up: shutdowns interrupt its `Atomics.wait` until the returned
+    /// guard is dropped, which must happen before the engine is.
+    pub(crate) fn attach_atomics(&self, engine: &crate::js::Engine) -> AtomicsAttached<'_> {
+        let rt = engine.raw_runtime();
+        let mut gate = self.atomics.lock();
+        gate.rt = Some(rt as usize);
+        if gate.interrupted {
+            // SAFETY: the engine is alive (the JS thread is attaching it).
+            unsafe { crate::js::ext::JS_InterruptAtomicsWait(rt) };
+        }
+        AtomicsAttached(self)
+    }
+
+    /// Wake the JS thread from `Atomics.wait`; later waits throw an uncatchable error.
+    fn interrupt_atomics(&self) {
+        let mut gate = self.atomics.lock();
+        gate.interrupted = true;
+        if let Some(rt) = gate.rt {
+            // SAFETY: `rt` stays alive until `detach_atomics`, which takes the same lock.
+            unsafe { crate::js::ext::JS_InterruptAtomicsWait(rt as *mut crate::js::rquickjs::qjs::JSRuntime) };
+        }
+    }
+
     pub(crate) fn next_id(&self) -> u64 {
         self.ids.fetch_add(1, Ordering::Relaxed)
     }
@@ -383,6 +426,7 @@ impl JsRuntime {
                 .unwrap_or(0.0),
             env,
             cwd: cwd.clone(),
+            atomics: Mutex::default(),
         });
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -484,6 +528,8 @@ impl JsRuntime {
     /// Stop the JS thread. Pending calls fail with [`Error::Terminated`].
     pub fn shutdown(&self) {
         let _ = self.inner.tx.send(Msg::Shutdown);
+        // A thread blocked in `Atomics.wait` would never see the message.
+        self.inner.shared.interrupt_atomics();
     }
 
     pub(crate) fn post(&self, f: impl FnOnce(&mut Context) + Send + 'static) -> Result<()> {

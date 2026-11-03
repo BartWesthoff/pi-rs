@@ -1200,6 +1200,9 @@ typedef int JSInterruptHandler(JSRuntime *rt, void *opaque);
 JS_EXTERN void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque);
 /* if can_block is true, Atomics.wait() can be used */
 JS_EXTERN void JS_SetCanBlock(JSRuntime *rt, bool can_block);
+/* Wake this runtime's threads blocked in Atomics.wait; from now on Atomics.wait throws an
+   uncatchable "interrupted" error in it. Callable from any thread while `rt` is alive. */
+JS_EXTERN void JS_InterruptAtomicsWait(JSRuntime *rt);
 /* set the [IsHTMLDDA] internal slot */
 JS_EXTERN void JS_SetIsHTMLDDA(JSContext *ctx, JSValueConst obj);
 
