@@ -1,0 +1,21 @@
+journal_mode: {"[null]":{"journal_mode":"wal"}}
+synchronous: []
+mmap: {"[null]":{"mmap_size":268435456}}
+location: true
+location main: true
+location temp: null
+location missing: null
+wal exists: true
+reader location: true
+reader sees committed only: {"[null]":{"n":200}}
+writer sees own: {"[null]":{"n":201}}
+reader after commit: {"[null]":{"n":201}}
+checkpoint passive: {"[null]":{"busy":0,"log":4,"checkpointed":4}}
+checkpoint truncate: [{"[null]":{"busy":0,"log":0,"checkpointed":0}}]
+wal truncated: 0
+wal removed on close: false
+readonly count: {"[null]":{"n":201}}
+readonly write: {"error":{"name":"Error","message":"attempt to write a readonly database","code":"ERR_SQLITE_ERROR","errcode":8,"errstr":"attempt to write a readonly database"}}
+readonly missing: {"error":{"name":"Error","message":"unable to open database file","code":"ERR_SQLITE_ERROR","errcode":14,"errstr":"unable to open database file"}}
+url scheme: {"error":{"name":"TypeError","message":"The URL must be of scheme file:","code":"ERR_INVALID_URL_SCHEME"}}
+uri mode: {"ok":{"[null]":{"n":201}}}
