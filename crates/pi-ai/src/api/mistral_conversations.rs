@@ -11,8 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +20,7 @@ use super::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_
 use super::simple_options::build_base_options;
 use super::transform_messages::transform_messages;
 use crate::models::{ProviderStreams, calculate_cost, clamp_thinking_level};
+use crate::transport::HttpRequest;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Message, Model, ModelInputModality,
     ModelThinkingLevel, ProviderHeaders, ProviderResponse, StopReason, StreamOptions, TextContent, ThinkingContent,
@@ -426,7 +426,7 @@ fn chat_url(base_url: &str) -> anyhow::Result<String> {
     Ok(base.join("v1/chat/completions")?.to_string())
 }
 
-type ByteStream = std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+type ByteStream = crate::transport::ResponseBody;
 
 enum MistralEvent {
     Data(Value),
@@ -577,17 +577,16 @@ async fn request_mistral_stream(
 ) -> anyhow::Result<MistralEventReader> {
     let url = chat_url(&model.base_url)?;
     let headers = build_headers(model, api_key, options);
-    let client = match &options.http_client {
-        Some(client) => client.clone(),
-        None => crate::utils::http::client_for(&url, options.env.as_ref())?,
-    };
-    let mut request = client.post(&url).body(serde_json::to_vec(&to_mistral_wire_payload(payload))?);
+    let client = crate::transport::http_transport_for(&url, options)?;
+    let mut request = HttpRequest::post(&url)
+        .body(serde_json::to_vec(&to_mistral_wire_payload(payload))?)
+        .signal(options.signal.clone());
     for (name, value) in &headers {
         request = request.header(name.as_str(), value.as_str());
     }
     // The timeout covers only the wait for response headers; long streams must not be cut off.
     let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_HEADER_TIMEOUT_MS);
-    let send = crate::utils::wasm::timeout(Duration::from_millis(timeout_ms), request.send());
+    let send = crate::utils::wasm::timeout(Duration::from_millis(timeout_ms), client.send(request));
     let response = match &options.signal {
         Some(signal) => {
             if signal.is_cancelled() {
@@ -602,21 +601,21 @@ async fn request_mistral_stream(
     };
     let response = match response {
         Err(_) => anyhow::bail!("Mistral response headers timed out after {timeout_ms}ms"),
-        Ok(result) => result.map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed::new(&e)))?,
+        Ok(result) => result.map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed { cause: e.network_error() }))?,
     };
     if let Some(on_response) = &options.on_response {
-        on_response(ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) }, model.clone())
+        on_response(ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) }, model.clone())
             .await;
     }
-    let status = response.status();
-    if !status.is_success() {
-        let status_text = status.canonical_reason().unwrap_or_default().to_string();
+    let status = response.status;
+    if !response.is_success() {
+        let status_text = response.status_text.clone();
         let body = response.text().await.unwrap_or_default();
-        let message = if status_text.is_empty() { format!("Request failed with status {}", status.as_u16()) } else { status_text };
-        return Err(MistralHttpError { status_code: status.as_u16(), body, message }.into());
+        let message = if status_text.is_empty() { format!("Request failed with status {status}") } else { status_text };
+        return Err(MistralHttpError { status_code: status, body, message }.into());
     }
     Ok(MistralEventReader {
-        body: Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())),
+        body: response.body,
         buffer: String::new(),
         pending: Vec::new(),
         signal: options.signal.clone(),

@@ -2,9 +2,11 @@
 //! The server manages auth and proxies requests to LLM providers.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use pi_ai::ToolCallArgumentsStream;
+use pi_ai::transport::{HttpRequest, HttpTransport, ReqwestTransport};
 use pi_ai::utils::now_ms;
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantMessageEventSender,
@@ -93,8 +95,8 @@ pub struct ProxyStreamOptions {
     pub auth_token: String,
     /// Proxy server URL (e.g. "https://genai.example.com").
     pub proxy_url: String,
-    /// HTTP client to use; a default client is created when `None`.
-    pub http_client: Option<reqwest::Client>,
+    /// HTTP transport to use; a default reqwest client is used when `None`.
+    pub http_transport: Option<Arc<dyn HttpTransport>>,
     pub temperature: Option<f64>,
     pub sampling_params: Option<SamplingParams>,
     pub max_tokens: Option<u64>,
@@ -119,7 +121,7 @@ impl ProxyStreamOptions {
             signal: options.signal.clone(),
             auth_token: auth_token.into(),
             proxy_url: proxy_url.into(),
-            http_client: options.http_client.clone(),
+            http_transport: options.http_transport.clone(),
             temperature: options.temperature,
             sampling_params: options.sampling_params.clone(),
             max_tokens: options.max_tokens,
@@ -257,27 +259,26 @@ async fn run_proxy_request(
     sender: &AssistantMessageEventSender,
     signal: &CancellationToken,
 ) -> Result<(), String> {
-    let client = options.http_client.clone().unwrap_or_default();
+    let client: Arc<dyn HttpTransport> = match &options.http_transport {
+        Some(transport) => transport.clone(),
+        None => Arc::new(ReqwestTransport::new(reqwest::Client::default())),
+    };
     let body = ProxyRequestBody {
         model,
         context,
         options: build_proxy_request_options(options),
     };
-    let response = client
-        .post(format!("{}/api/stream", options.proxy_url))
+    let request = HttpRequest::post(format!("{}/api/stream", options.proxy_url))
         .header("Authorization", format!("Bearer {}", options.auth_token))
         .header("Content-Type", "application/json")
         .body(serde_json::to_vec(&body).map_err(|e| e.to_string())?)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .signal(Some(signal.clone()));
+    let response = client.send(request).await.map_err(|e| e.to_string())?;
 
-    let status = response.status();
-    if !status.is_success() {
+    if !response.is_success() {
         let mut error_message = format!(
             "Proxy error: {} {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("")
+            response.status, response.status_text
         );
         if let Ok(error_data) = response.json::<Value>().await
             && let Some(error) = error_data
@@ -290,7 +291,7 @@ async fn run_proxy_request(
         return Err(error_message);
     }
 
-    let mut body = response.bytes_stream();
+    let mut body = response.body;
     let mut buffer: Vec<u8> = Vec::new();
     let mut saw_terminal_event = false;
 

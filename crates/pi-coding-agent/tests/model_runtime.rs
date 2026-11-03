@@ -1192,7 +1192,7 @@ async fn capture_image_request(
         ..classifier_context()
     };
     let options = StreamOptions {
-        http_client: Some(client),
+        http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(client))),
         ..Default::default()
     };
     let result = runtime.classify(model, context, Some(options.into())).await;

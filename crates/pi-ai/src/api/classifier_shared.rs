@@ -1,10 +1,12 @@
 //! Shared HTTP plumbing for classifier APIs (port of `api/classifier-shared.ts`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::models::calculate_cost;
+use crate::transport::{HttpRequest, HttpTransport, TransportError};
 use crate::types::{ClassifierModel, ImageModel, Model, ProviderHeaders, ProviderResponse, StreamOptions, Usage};
 use crate::utils::error_body::{
     MAX_PROVIDER_ERROR_BODY_CHARS, NormalizedProviderError, ProviderHttpError, normalize_provider_error,
@@ -114,14 +116,14 @@ fn request_headers(model: &ClassifierModel, api_key: Option<&str>, options: &Str
 /// One JSON POST with a fresh per-attempt timeout. Non-2xx responses become
 /// [`body_text_http_error`]s.
 pub(crate) async fn post_json_attempt(
-    client: &reqwest::Client,
+    client: &dyn HttpTransport,
     label: &str,
     url: &str,
     headers: &ProviderHeaders,
     payload: &Value,
     options: &StreamOptions,
 ) -> anyhow::Result<(ProviderResponse, Value)> {
-    let mut request = client.post(url).body(serde_json::to_vec(payload)?);
+    let mut request = HttpRequest::post(url).body(serde_json::to_vec(payload)?).signal(options.signal.clone());
     for (name, value) in headers {
         if let Some(value) = value {
             request = request.header(name.as_str(), value.as_str());
@@ -131,14 +133,14 @@ pub(crate) async fn post_json_attempt(
         request = request.timeout(Duration::from_millis(timeout));
     }
     let attempt = async {
-        let response = request.send().await.map_err(|e| map_send_error(e, options.timeout_ms))?;
-        let status = response.status();
-        let response_headers = response.headers().clone();
-        if !status.is_success() {
+        let response = client.send(request).await.map_err(|e| map_send_error(e, options.timeout_ms))?;
+        let status = response.status;
+        let response_headers = response.headers.clone();
+        if !response.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(body_text_http_error(label, status.as_u16(), response_headers, text).into());
+            return Err(body_text_http_error(label, status, response_headers, text).into());
         }
-        let provider_response = ProviderResponse { status: status.as_u16(), headers: headers_to_record(&response_headers) };
+        let provider_response = ProviderResponse { status, headers: headers_to_record(&response_headers) };
         let bytes = response.bytes().await.map_err(|e| map_send_error(e, options.timeout_ms))?;
         let json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("Unexpected token in JSON response: {e}"))?;
@@ -158,21 +160,19 @@ pub(crate) async fn post_json_attempt(
     }
 }
 
-fn map_send_error(error: reqwest::Error, timeout_ms: Option<u64>) -> anyhow::Error {
+fn map_send_error(error: TransportError, timeout_ms: Option<u64>) -> anyhow::Error {
     if error.is_timeout()
         && let Some(timeout) = timeout_ms {
             return timeout_http_error(timeout).into();
         }
     // A fetch failure (not an HTTP error): not retried, like a `TypeError` from `fetch`.
-    anyhow::Error::new(crate::utils::http::FetchFailed::new(&error))
+    anyhow::Error::new(crate::utils::http::FetchFailed { cause: error.network_error() })
 }
 
-/// The HTTP client for a request: the caller's `http_client`, else a proxy-aware shared client.
-pub(crate) fn http_client(url: &str, options: &StreamOptions) -> anyhow::Result<reqwest::Client> {
-    match &options.http_client {
-        Some(client) => Ok(client.clone()),
-        None => crate::utils::http::client_for(url, options.env.as_ref()),
-    }
+/// The HTTP transport for a request: the caller's `http_transport`, else a proxy-aware shared
+/// client.
+pub(crate) fn http_client(url: &str, options: &StreamOptions) -> anyhow::Result<Arc<dyn HttpTransport>> {
+    crate::transport::http_transport_for(url, options)
 }
 
 /// Post one JSON classifier request with bearer auth, `onPayload`/`onResponse` hooks, a fresh
@@ -203,7 +203,7 @@ pub async fn post_classifier_request(
         no_retry_statuses: no_retry_statuses.to_vec(),
     };
     let (response, json) =
-        retry_provider_request(|| post_json_attempt(&client, label, url, &headers, &payload, options), &retry).await?;
+        retry_provider_request(|| post_json_attempt(&*client, label, url, &headers, &payload, options), &retry).await?;
     if let Some(on_response) = &options.on_response {
         on_response(response, classifier_hook_model(model)).await;
     }

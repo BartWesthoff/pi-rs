@@ -341,7 +341,7 @@ async fn openrouter_image_form_reaches_proxies_regional_hosts_and_compat_declara
     ];
     for (index, (name, model)) in cases.into_iter().enumerate() {
         let options = StreamOptions {
-            http_client: Some(client.clone()),
+            http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(client.clone()))),
             ..key("secret")
         };
         let result =

@@ -4,7 +4,7 @@
 //! The TypeScript `createAiBindingFetch(env.AI)` adapts a Cloudflare Worker's AI binding into a
 //! `fetch`. Workers bindings exist only inside the Workers runtime, so the Rust port keeps the
 //! shared auth sentinel and the binding route helper; a caller that has a binding-backed HTTP
-//! transport passes it as `StreamOptions.http_client`.
+//! transport passes it as `StreamOptions.http_transport`.
 
 /// Workers AI direct endpoint.
 pub const CLOUDFLARE_WORKERS_AI_BASE_URL: &str = "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1";

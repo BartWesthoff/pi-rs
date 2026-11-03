@@ -18,6 +18,7 @@ use crate::env_api_keys::{
     ANTHROPIC_FEDERATION_RULE_ID_ENV, ANTHROPIC_IDENTITY_TOKEN_FILE_ENV, ANTHROPIC_ORGANIZATION_ID_ENV,
     ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, ANTHROPIC_WORKSPACE_ID_ENV,
 };
+use crate::transport::{HttpRequest, HttpResponse, HttpTransport};
 use crate::types::ProviderEnv;
 use crate::utils::provider_env::get_provider_env_value;
 
@@ -206,14 +207,7 @@ fn js_number(value: Option<&Value>) -> f64 {
     }
 }
 
-/// wasm32: reqwest's fetch backend has no incremental `chunk()`.
-#[cfg(target_arch = "wasm32")]
-async fn read_limited_text(response: reqwest::Response) -> String {
-    let bytes = response.bytes().await.unwrap_or_default();
-    String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TOKEN_RESPONSE_BYTES)]).into_owned()
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn read_limited_text(response: reqwest::Response) -> String {
+async fn read_limited_text(response: HttpResponse) -> String {
     let mut response = response;
     let mut bytes: Vec<u8> = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
@@ -231,7 +225,7 @@ async fn read_limited_text(response: reqwest::Response) -> String {
 pub async fn exchange_token(
     config: &AnthropicFederationConfig,
     base_url: &str,
-    client: &reqwest::Client,
+    client: &dyn HttpTransport,
     user_agent: &str,
 ) -> Result<AccessToken, WorkloadIdentityError> {
     require_secure_token_endpoint(base_url)?;
@@ -260,22 +254,22 @@ pub async fn exchange_token(
     } else {
         user_agent.to_string()
     };
-    let response = client
-        .post(&url)
+    let request = HttpRequest::post(&url)
         .header("Content-Type", "application/json")
         .header("anthropic-beta", format!("{OAUTH_API_BETA_HEADER},{FEDERATION_BETA_HEADER}"))
         .header("User-Agent", user_agent)
-        .body(Value::Object(body).to_string())
-        .send()
+        .body(Value::Object(body).to_string());
+    let response = client
+        .send(request)
         .await
         .map_err(|error| {
             WorkloadIdentityError::new(format!("Failed to reach token endpoint {url}: TypeError: fetch failed ({error})"))
         })?;
-    let status = response.status().as_u16();
-    let request_id = response.headers().get("request-id").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let status = response.status;
+    let request_id = response.headers.get("request-id").and_then(|v| v.to_str().ok()).map(str::to_string);
     let request_id_text = request_id.as_ref().map(|id| format!(" (request-id {id})")).unwrap_or_default();
 
-    if !response.status().is_success() {
+    if !response.is_success() {
         let text = response.text().await.unwrap_or_default();
         let redacted = redact_text(&text);
         let hint = if status == 401 {
@@ -442,7 +436,7 @@ static FEDERATION_CLIENT: LazyLock<Mutex<FederationClient>> = LazyLock::new(|| M
 pub fn federation_token_cache(
     config: &AnthropicFederationConfig,
     base_url: &str,
-    client: reqwest::Client,
+    client: Arc<dyn HttpTransport>,
     user_agent: String,
 ) -> Arc<TokenCache> {
     let key = format!("[{},{}]", json!(base_url), config.cache_key());
@@ -459,7 +453,7 @@ pub fn federation_token_cache(
         let base_url = exchange_base_url.clone();
         let client = client.clone();
         let user_agent = user_agent.clone();
-        crate::utils::wasm::boxed(async move { exchange_token(&config, &base_url, &client, &user_agent).await })
+        crate::utils::wasm::boxed(async move { exchange_token(&config, &base_url, &*client, &user_agent).await })
     });
     let cache = Arc::new(TokenCache::new(provider));
     *current = Some((key, cache.clone()));

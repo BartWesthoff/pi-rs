@@ -5,8 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -16,6 +15,7 @@ use super::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_
 use super::google_auth::{GoogleAuth, VERTEX_AI_SCOPE};
 use super::transform_messages::transform_messages;
 use crate::models::{calculate_cost, clamp_thinking_level};
+use crate::transport::{HttpRequest, HttpTransport, ReqwestTransport};
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Message, Model, ModelInputModality, ModelThinkingLevel,
     ProviderHeaders, StopReason, StreamOptions, TextContent, ThinkingContent, Tool, ToolCall, TranscriptContext,
@@ -1003,21 +1003,23 @@ impl GoogleClient {
     }
 
     /// `models.generateContentStream(params)`: POST the converted body and return the SSE chunk
-    /// reader. HTTP failures become `ApiError`s.
+    /// reader. HTTP failures become `ApiError`s. `auth_client` fetches Google auth tokens;
+    /// `transport` sends the request itself.
     pub async fn generate_content_stream(
         &self,
-        client: &reqwest::Client,
+        transport: &dyn HttpTransport,
+        auth_client: &reqwest::Client,
         params: &Value,
         signal: Option<&CancellationToken>,
     ) -> anyhow::Result<GoogleChunkReader> {
         let (model_path, body) = generate_content_request_body(params, self.vertex)?;
         let url = self.stream_url(&model_path);
-        let headers = self.request_headers(client).await?;
-        let mut request = client.post(&url).body(serde_json::to_vec(&body)?);
+        let headers = self.request_headers(auth_client).await?;
+        let mut request = HttpRequest::post(&url).body(serde_json::to_vec(&body)?).signal(signal.cloned());
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
-        let send = request.send();
+        let send = transport.send(request);
         let response = match signal {
             Some(signal) => {
                 if signal.is_cancelled() {
@@ -1030,27 +1032,27 @@ impl GoogleClient {
             }
             None => send.await,
         }
-        .map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed::new(&e)))?;
-        let status = response.status();
-        if !status.is_success() {
+        .map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed { cause: e.network_error() }))?;
+        let status = response.status;
+        if !response.is_success() {
             let is_json = response
-                .headers()
+                .headers
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v.contains("application/json"));
-            let status_text = status.canonical_reason().unwrap_or_default().to_string();
+            let status_text = response.status_text.clone();
             let text = response.text().await.unwrap_or_default();
             let error_body = match serde_json::from_str::<Value>(&text) {
                 Ok(json) if is_json => json,
-                _ => json!({ "error": { "message": text, "code": status.as_u16(), "status": status_text } }),
+                _ => json!({ "error": { "message": text, "code": status, "status": status_text } }),
             };
             let message = error_body.to_string();
-            if (400..600).contains(&status.as_u16()) {
-                return Err(google_api_error(status.as_u16(), message).into());
+            if (400..600).contains(&status) {
+                return Err(google_api_error(status, message).into());
             }
             anyhow::bail!("{message}");
         }
-        Ok(GoogleChunkReader::new(Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())), signal.cloned()))
+        Ok(GoogleChunkReader::new(response.body, signal.cloned()))
     }
 }
 
@@ -1063,7 +1065,7 @@ fn append_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
     }
 }
 
-type ByteStream = std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+type ByteStream = crate::transport::ResponseBody;
 
 /// The SDK's `processStreamResponse`: splits the body on blank lines (`\n\n`, `\r\r`,
 /// `\r\n\r\n`) and yields the JSON of each `data:` event.
@@ -1545,7 +1547,7 @@ pub async fn run_google_stream(model: Model, context: TranscriptContext, options
         ..Default::default()
     };
     let result: anyhow::Result<()> = async {
-        if options.http_client.is_some() {
+        if options.http_transport.is_some() {
             anyhow::bail!("{}", spec.custom_client_error);
         }
         let client = (spec.create_client)(&model, &options)?;
@@ -1556,8 +1558,12 @@ pub async fn run_google_stream(model: Model, context: TranscriptContext, options
             params = next;
         }
         let http = crate::utils::http::client_for(&client.base_url, options.env.as_ref())?;
-        let mut reader =
-            retry_google_request(|| client.generate_content_stream(&http, &params, options.signal.as_ref()), &options).await?;
+        let transport = ReqwestTransport::new(http.clone());
+        let mut reader = retry_google_request(
+            || client.generate_content_stream(&transport, &http, &params, options.signal.as_ref()),
+            &options,
+        )
+        .await?;
         sender.push(AssistantMessageEvent::Start { partial: output.clone() });
         let mut in_block = false;
         while let Some(chunk) = reader.next_chunk().await? {

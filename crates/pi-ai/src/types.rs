@@ -213,8 +213,12 @@ pub struct StreamOptions {
     /// Explicit parent context for telemetry produced by this logical request.
     pub telemetry: Option<pi_telemetry::ContextRef>,
     pub api_key: Option<String>,
-    /// Custom HTTP client (the `fetch` option equivalent).
-    pub http_client: Option<reqwest::Client>,
+    /// Custom HTTP transport (the `fetch` option equivalent); `None` uses the shared reqwest
+    /// clients. [`StreamOptions::with_http_client`] wraps a reqwest client.
+    pub http_transport: Option<Arc<dyn crate::transport::HttpTransport>>,
+    /// Custom WebSocket transport (the `WebSocket` constructor equivalent) for APIs that stream
+    /// over a WebSocket; `None` uses tokio-tungstenite.
+    pub ws_transport: Option<Arc<dyn crate::transport::WsTransport>>,
     pub env: Option<ProviderEnv>,
     pub on_payload: Option<OnPayload>,
     pub on_response: Option<OnResponse>,
@@ -250,6 +254,13 @@ pub type DeferredCancelOptions = StreamOptions;
 impl StreamOptions {
     pub fn is_aborted(&self) -> bool {
         self.signal.as_ref().is_some_and(|s| s.is_cancelled())
+    }
+
+    /// Send HTTP requests through `client` (a [`ReqwestTransport`](crate::transport::ReqwestTransport)).
+    #[must_use]
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_transport = Some(Arc::new(crate::transport::ReqwestTransport::new(client)));
+        self
     }
 
     /// Read an API-specific option.

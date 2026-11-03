@@ -206,7 +206,7 @@ async fn surfaces_in_stream_error_objects() {
 #[tokio::test]
 async fn rejects_custom_http_clients_and_missing_keys() {
     let model = get_builtin_model("google", "gemini-2.5-flash").unwrap();
-    let options = StreamOptions { api_key: Some("k".into()), http_client: Some(reqwest::Client::new()), ..Default::default() };
+    let options = StreamOptions { api_key: Some("k".into()), http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(reqwest::Client::new()))), ..Default::default() };
     let message = google_generative_ai::stream(&model, &context("hi"), options).result().await;
     assert_eq!(message.error_message.as_deref(), Some("Custom fetch is not supported by the Google Generative AI adapter"));
     let message = google_generative_ai::stream(&model, &context("hi"), StreamOptions::default()).result().await;

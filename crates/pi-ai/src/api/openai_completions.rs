@@ -29,7 +29,7 @@ use crate::utils::error_body::{SdkErrorStyle, format_provider_error, normalize_p
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
-use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, client_for, post_json};
+use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, post_json};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::json_parse::parse_tool_call_arguments;
 use crate::utils::streaming_json::ToolCallArgumentsStream;
@@ -1126,10 +1126,7 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
                 params = next;
             }
         let url = chat_completions_url(&model.base_url);
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = crate::transport::http_transport_for(&url, &options)?;
         let retry = ProviderRetryOptions {
             max_retries: options.max_retries,
             max_retry_delay_ms: options.max_retry_delay_ms,
@@ -1137,13 +1134,13 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
             no_retry_statuses: Vec::new(),
         };
         let response = retry_provider_request(
-            || post_json(&client, &url, &headers, &params, Some(timeout_ms), signal.as_ref(), SdkErrorStyle::OpenAI),
+            || post_json(&*client, &url, &headers, &params, Some(timeout_ms), signal.as_ref(), SdkErrorStyle::OpenAI),
             &retry,
         )
         .await?;
         if let Some(on_response) = &options.on_response {
             on_response(
-                ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) },
+                ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) },
                 model.clone(),
             )
             .await;

@@ -250,7 +250,7 @@ struct RequestContext<'a> {
     model: &'a ClassifierModel,
     root: String,
     options: &'a StreamOptions,
-    client: reqwest::Client,
+    client: std::sync::Arc<dyn crate::transport::HttpTransport>,
 }
 
 async fn post(request: &RequestContext<'_>, path: &str, body: Value, observe: bool) -> anyhow::Result<Value> {
@@ -271,7 +271,7 @@ async fn post(request: &RequestContext<'_>, path: &str, body: Value, observe: bo
         no_retry_statuses: Vec::new(),
     };
     let (response, json) =
-        retry_provider_request(|| post_json_attempt(client, LABEL, &url, &headers, &payload, options), &retry).await?;
+        retry_provider_request(|| post_json_attempt(&**client, LABEL, &url, &headers, &payload, options), &retry).await?;
     if observe
         && let Some(on_response) = &options.on_response {
             on_response(response, classifier_hook_model(model)).await;
