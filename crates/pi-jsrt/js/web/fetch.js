@@ -634,12 +634,14 @@ class Request {
     this.cache = init.cache ?? "default";
     this.referrer = init.referrer ?? "about:client";
     this.keepalive = Boolean(init.keepalive);
-    this.duplex = init.duplex;
+    // Node's Request always reports half duplex.
+    this.duplex = "half";
     if (init.body !== undefined && init.body !== null && (this.method === "GET" || this.method === "HEAD")) {
       throw new TypeError("Request with GET/HEAD method cannot have body.");
     }
     if (init.body !== undefined) {
       const ct = this._initBody(init.body);
+      if (this[kBody].stream && init.duplex == null) throw new TypeError("RequestInit: duplex option is required when sending a body.");
       if (ct && !this.headers.has("content-type")) this.headers.set("content-type", ct);
     } else if (base.body) {
       this[kBody] = { ...base.body, used: false, streamObj: null };
@@ -715,6 +717,192 @@ function abortReason(signal) {
   return err;
 }
 
+// ---------------------------------------------------------------------------
+// undici dispatchers
+// ---------------------------------------------------------------------------
+//
+// `fetch(url, { dispatcher })` and undici's `setGlobalDispatcher` take npm `undici` Agent,
+// ProxyAgent and EnvHttpProxyAgent objects. Their settings are read back from the fields undici
+// stores them in (symbols named "options", "proxy agent options", ...; the same in undici 6 to
+// 8) and applied natively: proxy, TLS, connect/headers/body timeouts, HTTP/2 opt-in.
+
+// undici 7+ keeps its global dispatcher under `.2` (and a v1-API wrapper of it under `.1`).
+const kGlobalDispatchers = [Symbol.for("undici.globalDispatcher.2"), Symbol.for("undici.globalDispatcher.1")];
+const UNDICI_DEFAULTS = { headersTimeout: 300e3, bodyTimeout: 300e3, connectTimeout: 10e3 };
+
+function symbolNamed(obj, description) {
+  for (let o = obj; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const s of Object.getOwnPropertySymbols(o)) if (s.description === description) return s;
+  }
+  return undefined;
+}
+
+function slot(obj, description) {
+  const s = symbolNamed(obj, description);
+  return s === undefined ? undefined : obj[s];
+}
+
+function pemList(v) {
+  if (v === undefined || v === null) return [];
+  if (Array.isArray(v)) return v.flatMap(pemList);
+  return [typeof v === "string" ? v : Buffer.from(v).toString("latin1")];
+}
+
+function timeoutOption(v, fallback) {
+  return typeof v === "number" && v >= 0 ? v : fallback;
+}
+
+// undici's NO_PROXY matching (EnvHttpProxyAgent#shouldProxy), for objects the probe below
+// cannot ask.
+function bypassesProxy(url, noProxy) {
+  const host = url.hostname.replace(/^\[(.+)\]$/, "$1").toLowerCase().replace(/(.)\.$/, "$1");
+  const port = Number.parseInt(url.port, 10) || (url.protocol === "https:" ? 443 : 80);
+  for (const entry of noProxy.split(/[,\s]/)) {
+    if (!entry) continue;
+    const m = /^\[(.+)\]:(\d+)$/.exec(entry) ?? (entry.split(":").length === 2 ? /^(.+):(\d+)$/.exec(entry) : null);
+    const name = (m ? m[1] : entry.replace(/^\[(.+)\]$/, "$1")).replace(/^\*?\./, "").replace(/^(.+)\.$/, "$1").toLowerCase();
+    const entryPort = m ? Number.parseInt(m[2], 10) : 0;
+    if (entryPort && entryPort !== port) continue;
+    if (name === "*") return true;
+    if ((!entry.startsWith("*") && host === name) || host.endsWith(`.${name}`)) return true;
+  }
+  return false;
+}
+
+// The child agent an EnvHttpProxyAgent dispatches `url` to. Its own selection logic is asked
+// by running its dispatch method against the children with their `dispatch` stubbed out for
+// the call (synchronous, so nothing else can observe the stubs).
+function envProxyChild(agent, url) {
+  const children = [slot(agent, "no proxy agent"), slot(agent, "http proxy agent"), slot(agent, "https proxy agent")];
+  const dispatch = slot(agent, "dispatch");
+  let chosen;
+  if (typeof dispatch === "function" && children.every((c) => c && typeof c === "object")) {
+    const saved = children.map((c) => Object.getOwnPropertyDescriptor(c, "dispatch"));
+    for (const c of children) {
+      Object.defineProperty(c, "dispatch", { value: () => ((chosen ??= c), true), configurable: true, writable: true });
+    }
+    try {
+      dispatch.call(agent, { origin: url.origin, path: url.pathname + url.search, method: "GET", headers: {} }, {});
+    } catch {
+      // The fallback below decides.
+    } finally {
+      children.forEach((c, i) => (saved[i] ? Object.defineProperty(c, "dispatch", saved[i]) : delete c.dispatch));
+    }
+  }
+  if (chosen) return chosen;
+  const env = internal.process?.env ?? {};
+  if (bypassesProxy(url, env.no_proxy ?? env.NO_PROXY ?? "")) return children[0];
+  return url.protocol === "https:" ? children[2] : children[1];
+}
+
+// `{ settings, headersTimeout, bodyTimeout }` for a request to `url` through `dispatcher`.
+function dispatcherSettings(dispatcher, url) {
+  for (let depth = 0; dispatcher && typeof dispatcher === "object" && depth < 4; depth++) {
+    if (symbolNamed(dispatcher, "no proxy agent")) {
+      dispatcher = envProxyChild(dispatcher, url);
+      continue;
+    }
+    const proxy = slot(dispatcher, "proxy agent options");
+    if (proxy && typeof proxy === "object" && proxy.uri) {
+      const options = slot(slot(dispatcher, "proxy agent"), "options") ?? {};
+      const tls = slot(dispatcher, "request tls settings") ?? {};
+      const uri = new internal.URL(proxy.uri);
+      if (uri.protocol === "http:" || uri.protocol === "https:") {
+        // The credentials are already in the proxy headers as proxy-authorization.
+        uri.username = "";
+        uri.password = "";
+      }
+      const headers = Object.entries(slot(dispatcher, "proxy headers") ?? {}).map(([k, v]) => [String(k), String(v)]);
+      return settingsFrom(options, tls, { uri: uri.href, headers, tunnel: url.protocol === "http:" && slot(dispatcher, "tunnel proxy") === true });
+    }
+    const options = slot(dispatcher, "options");
+    if (options && typeof options === "object") {
+      return settingsFrom(options, typeof options.connect === "object" && options.connect ? options.connect : {}, null);
+    }
+    break;
+  }
+  return null;
+}
+
+function settingsFrom(options, tls, proxy) {
+  const connectTimeout = timeoutOption(tls.timeout ?? options.connectTimeout, UNDICI_DEFAULTS.connectTimeout);
+  const settings = {
+    envProxy: false,
+    proxy,
+    ca: pemList(tls.ca),
+    cert: pemList(tls.cert),
+    key: pemList(tls.key),
+    passphrase: tls.passphrase === undefined ? null : String(tls.passphrase),
+    rejectUnauthorized: tls.rejectUnauthorized === undefined ? null : Boolean(tls.rejectUnauthorized),
+    connectTimeout,
+    allowH2: options.allowH2 === true,
+  };
+  return {
+    settings: JSON.stringify(settings),
+    headersTimeout: timeoutOption(options.headersTimeout, UNDICI_DEFAULTS.headersTimeout),
+    bodyTimeout: timeoutOption(options.bodyTimeout, UNDICI_DEFAULTS.bodyTimeout),
+  };
+}
+
+// The plain `new Agent()` undici installs as the global dispatcher when its module loads and
+// none is set. In TS Pi that never happens (Pi installs its EnvHttpProxyAgent first), so it
+// keeps the host default below.
+function isModuleDefaultAgent(dispatcher) {
+  if (symbolNamed(dispatcher, "proxy agent options") || symbolNamed(dispatcher, "no proxy agent")) return false;
+  const options = slot(dispatcher, "options");
+  return Boolean(options) && typeof options === "object" && Object.entries(options).every(([k, v]) => v === undefined || (k === "maxOrigins" && v === Infinity));
+}
+
+function globalDispatcher() {
+  for (const key of kGlobalDispatchers) {
+    const d = globalThis[key];
+    if (d) return isModuleDefaultAgent(d) ? null : d;
+  }
+  return null;
+}
+
+// No dispatcher: Node's defaults, with the environment proxy honoured as Pi's global
+// EnvHttpProxyAgent does.
+const DEFAULT_SETTINGS = {
+  settings: JSON.stringify({ envProxy: true, connectTimeout: UNDICI_DEFAULTS.connectTimeout }),
+  headersTimeout: UNDICI_DEFAULTS.headersTimeout,
+  bodyTimeout: UNDICI_DEFAULTS.bodyTimeout,
+};
+
+// Fetch's "bad port" list: such requests fail before any connection is made.
+const BAD_PORTS = new Set(
+  "1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512 513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 4045 4190 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080".split(" "),
+);
+
+function chunkBytes(c) {
+  if (c instanceof Uint8Array) return c;
+  if (typeof c === "string") return ops.utf8Encode(c);
+  if (c instanceof ArrayBuffer) return new Uint8Array(c);
+  if (ArrayBuffer.isView(c)) return new Uint8Array(c.buffer, c.byteOffset, c.byteLength);
+  throw new TypeError("Received non-Uint8Array chunk");
+}
+
+// Feed a streamed request body to the native request, chunk by chunk with backpressure.
+async function pumpUpload(id, stream, failed) {
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!(await ops.fetchWrite(id, chunkBytes(value)))) {
+        reader.cancel().catch(() => {});
+        return;
+      }
+    }
+    await ops.fetchWrite(id, null);
+  } catch (err) {
+    failed(err);
+    ops.fetchWriteError(id, String(err?.message ?? err));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function fetch(input, init = {}) {
   const request = input instanceof Request && Object.keys(init).length === 0 ? input : new Request(input, init);
   const signal = request.signal;
@@ -729,14 +917,23 @@ async function fetch(input, init = {}) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new TypeError("fetch failed", { cause: new Error(`unknown scheme ${url.protocol}`) });
   }
-  let bodyBytes = null;
+  if (BAD_PORTS.has(url.port)) throw new TypeError("fetch failed", { cause: new Error("bad port") });
+  const dispatcher = init?.dispatcher ?? globalDispatcher();
+  const { settings, headersTimeout, bodyTimeout } = (dispatcher && dispatcherSettings(dispatcher, url)) || DEFAULT_SETTINGS;
+  let bodyArg = null;
+  let upload = null;
   const b = request[kBody];
   if (b.formData) {
     const enc = await b.formData._encode();
-    bodyBytes = enc.bytes;
+    bodyArg = enc.bytes;
     if (!request.headers.has("content-type")) request.headers.set("content-type", enc.contentType);
-  } else if (b.stream || b.streamObj || b.bytes || b.blob) {
-    bodyBytes = await request._consume();
+  } else if (b.stream || b.streamObj) {
+    if (b.used) throw new TypeError("Body is unusable: Body has already been read");
+    b.used = true;
+    upload = b.streamObj ?? b.stream;
+    bodyArg = true;
+  } else if (b.bytes || b.blob) {
+    bodyArg = await request._consume();
   }
   if (!request.headers.has("accept")) request.headers.set("accept", "*/*");
   if (!request.headers.has("user-agent")) request.headers.set("user-agent", "node");
@@ -752,17 +949,18 @@ async function fetch(input, init = {}) {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
   aborted.catch(() => {});
+  let uploadError;
   let head;
   try {
-    head = await Promise.race([ops.fetchStart(id, request.method, url.href, headerPairs, bodyBytes, request.redirect), aborted]);
+    const started = ops.fetchStart(id, request.method, url.href, headerPairs, bodyArg, request.redirect, settings, headersTimeout, bodyTimeout);
+    if (upload) pumpUpload(id, upload, (e) => (uploadError ??= e));
+    head = await Promise.race([started, aborted]);
   } catch (err) {
     signal?.removeEventListener("abort", onAbort);
     if (err?.name === "AbortError" && signal?.aborted) throw abortReason(signal);
-    if (err?.name === "TypeError" && !(err instanceof TypeError)) {
-      const e = new TypeError(err.message);
-      throw e;
-    }
-    throw err;
+    if (err instanceof TypeError) throw err;
+    if (err?.name === "TypeError") throw new TypeError(err.message);
+    throw new TypeError("fetch failed", { cause: uploadError ?? err });
   }
   const headers = new Headers();
   for (let i = 0; i < head.headers.length; i += 2) headers.append(head.headers[i], head.headers[i + 1]);
@@ -779,7 +977,9 @@ async function fetch(input, init = {}) {
             } else controller.enqueue(chunk);
           } catch (err) {
             signal?.removeEventListener("abort", onAbort);
-            controller.error(signal?.aborted ? abortReason(signal) : err);
+            if (signal?.aborted) controller.error(abortReason(signal));
+            else if (err?.name === "AbortError") controller.error(err);
+            else controller.error(new TypeError("terminated", { cause: err }));
           }
         },
         cancel() {
