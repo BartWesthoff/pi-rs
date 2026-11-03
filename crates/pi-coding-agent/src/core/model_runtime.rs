@@ -312,7 +312,7 @@ enum UnauthorizedAttempt {
     /// The request did not fail with HTTP 401 before its first event: stream it on.
     Stream(AssistantMessageEventStream),
     /// The request failed with HTTP 401 before producing output.
-    Unauthorized { error: AssistantMessage, api_key: Option<String> },
+    Unauthorized { error: Box<AssistantMessage>, api_key: Option<String> },
 }
 
 /// A stream that yields `first`, then everything `rest` yields, and ends with its result.
@@ -1296,9 +1296,9 @@ impl ModelRuntime {
             UnauthorizedAttempt::Stream(stream) => return Ok(stream),
             UnauthorizedAttempt::Unauthorized { error, api_key } => (error, api_key),
         };
-        let relogin = |mut error: AssistantMessage| {
+        let relogin = |mut error: Box<AssistantMessage>| {
             error.error_message = Some(format_oauth_relogin_message(&model.provider));
-            Ok(single_error_stream(error))
+            Ok(single_error_stream(*error))
         };
         if let Some(rejected) = rejected_access
             && let Err(refresh_error) =
@@ -1349,7 +1349,7 @@ impl ModelRuntime {
             && unauthorized.load(Ordering::SeqCst)
             && !aborted.is_some_and(|signal| signal.is_cancelled())
         {
-            return Ok(UnauthorizedAttempt::Unauthorized { error: error.clone(), api_key });
+            return Ok(UnauthorizedAttempt::Unauthorized { error: Box::new(error.clone()), api_key });
         }
         Ok(UnauthorizedAttempt::Stream(match first {
             Some(first) => prepend_event(first, stream),
