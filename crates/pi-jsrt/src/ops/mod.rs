@@ -225,6 +225,12 @@ const LAZY_GLUE: &[LazyGlue] = &[
         globals: &[],
     },
     LazyGlue {
+        file: "jiti.js",
+        src: pi_embed::include_str!("../../js/jiti.js"),
+        builtins: &["jsrt:jiti"],
+        globals: &[],
+    },
+    LazyGlue {
         file: "web/messaging.js",
         src: pi_embed::include_str!("../../js/web/messaging.js"),
         builtins: &[],

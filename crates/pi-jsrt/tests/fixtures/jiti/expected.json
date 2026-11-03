@@ -1,0 +1,297 @@
+{
+  "esm": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "default",
+        "kind",
+        "loads"
+      ],
+      "esModule": false,
+      "defaultType": "function",
+      "values": {
+        "default": "[function greet]",
+        "kind": "esm",
+        "loads": 1
+      }
+    },
+    "require": {
+      "type": "object",
+      "keys": [
+        "default",
+        "kind",
+        "loads"
+      ],
+      "esModule": true,
+      "defaultType": "function",
+      "values": {
+        "default": "[function greet]",
+        "kind": "esm",
+        "loads": 1
+      }
+    },
+    "importDefault": "[function greet]"
+  },
+  "cjs": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "bump",
+        "count",
+        "default",
+        "kind"
+      ],
+      "esModule": false,
+      "defaultType": "object",
+      "values": {
+        "bump": "[function bump]",
+        "count": 0,
+        "default": {
+          "kind": "cjs",
+          "count": 1,
+          "bump": "[function bump]"
+        },
+        "kind": "cjs"
+      }
+    },
+    "require": {
+      "type": "object",
+      "keys": [
+        "kind",
+        "count",
+        "bump"
+      ],
+      "esModule": false,
+      "defaultType": "object",
+      "values": {
+        "kind": "cjs",
+        "count": 1,
+        "bump": "[function bump]"
+      }
+    },
+    "sharedCount": 1
+  },
+  "ts": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "Mode",
+        "state",
+        "summary"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "Mode": {
+          "1": "Slow",
+          "2": "Fast",
+          "Slow": 1,
+          "Fast": 2
+        },
+        "state": {
+          "evaluations": 1
+        },
+        "summary": {
+          "greeting": "hello ts",
+          "esmKind": "esm",
+          "cjsKind": "cjs",
+          "mode": 2
+        }
+      }
+    },
+    "require": {
+      "type": "object",
+      "keys": [
+        "Mode",
+        "state",
+        "summary"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "Mode": {
+          "1": "Slow",
+          "2": "Fast",
+          "Slow": 1,
+          "Fast": 2
+        },
+        "state": {
+          "evaluations": 1
+        },
+        "summary": {
+          "greeting": "hello ts",
+          "esmKind": "esm",
+          "cjsKind": "cjs",
+          "mode": 2
+        }
+      }
+    },
+    "freshPerImport": true,
+    "extensionless": [
+      "Mode",
+      "state",
+      "summary"
+    ]
+  },
+  "defaultInterop": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "default",
+        "legacyCallable",
+        "legacyLabel"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "default": {
+          "label": "default-object",
+          "shout": "[function shout]"
+        },
+        "legacyCallable": "object",
+        "legacyLabel": null
+      }
+    },
+    "label": "default-object",
+    "shout": "LOUD",
+    "defaultOption": {
+      "label": "default-object",
+      "shout": "[function shout]"
+    },
+    "noInterop": {
+      "type": "object",
+      "keys": [
+        "default",
+        "legacyCallable",
+        "legacyLabel"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "default": {
+          "label": "default-object",
+          "shout": "[function shout]"
+        },
+        "legacyCallable": "object",
+        "legacyLabel": null
+      }
+    },
+    "noInteropLabel": null,
+    "legacy": {
+      "type": "object",
+      "keys": [
+        "__esModule",
+        "default",
+        "extra"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "__esModule": true,
+        "default": {
+          "default": {
+            "label": "legacy-default"
+          },
+          "extra": "legacy-extra"
+        },
+        "extra": "legacy-extra"
+      }
+    },
+    "legacyRequire": {
+      "type": "object",
+      "keys": [
+        "default",
+        "extra"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "default": {
+          "label": "legacy-default"
+        },
+        "extra": "legacy-extra"
+      }
+    }
+  },
+  "alias": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "aliased"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "aliased": {
+          "value": "aliased-index",
+          "deep": "aliased-deep"
+        }
+      }
+    },
+    "resolve": "<root>/aliased/index.ts",
+    "esmResolve": "file://<root>/aliased/deep.ts"
+  },
+  "virtual": {
+    "import": {
+      "type": "object",
+      "keys": [
+        "identity"
+      ],
+      "esModule": true,
+      "defaultType": "object",
+      "values": {
+        "identity": {
+          "named": true,
+          "defaultImport": true,
+          "namespaceProperty": true,
+          "viaNativeFallback": true,
+          "version": "1.4.0"
+        }
+      }
+    },
+    "identity": {
+      "named": true,
+      "defaultImport": true,
+      "namespaceProperty": true,
+      "viaNativeFallback": true,
+      "version": "1.4.0"
+    },
+    "requireIdentity": {
+      "named": true,
+      "defaultImport": true,
+      "namespaceProperty": true,
+      "viaNativeFallback": true,
+      "version": "1.4.0"
+    },
+    "direct": {
+      "same": true,
+      "wrapped": true
+    },
+    "esmResolveVirtual": "MODULE_NOT_FOUND"
+  },
+  "shape": {
+    "defaultExport": true,
+    "requireType": "function",
+    "requireCreateJiti": "function",
+    "instanceKeys": [
+      "cache",
+      "esmResolve",
+      "evalModule",
+      "extensions",
+      "import",
+      "main",
+      "options",
+      "resolve",
+      "transform"
+    ],
+    "instanceType": "function",
+    "cacheType": "object",
+    "resolveTs": "<root>/ts-module.ts",
+    "esmResolveTs": "file://<root>/ts-module.ts",
+    "resolveBuiltin": "node:fs",
+    "resolveNodeBuiltin": "node:path",
+    "tryMissing": null,
+    "missingImport": "MODULE_NOT_FOUND",
+    "builtinImport": "function"
+  }
+}

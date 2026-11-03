@@ -187,6 +187,41 @@ pub fn transpile(source: &str, path: &Path, lang: SourceLang) -> Result<Transpil
     })
 }
 
+/// The specifiers a module statically imports or re-exports from (`import … from`, `export … from`,
+/// type-only imports excluded), or `None` when `source` has no ES module syntax.
+///
+/// # Errors
+///
+/// A syntax error in `source`.
+pub fn static_imports(
+    source: &str,
+    path: &Path,
+    lang: SourceLang,
+) -> Result<Option<Vec<String>>, Error> {
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, source_type_for(lang))
+        .with_options(ParseOptions {
+            allow_return_outside_function: lang == SourceLang::JavaScript,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if ret.fatal_error || ret.diagnostics.has_errors() {
+        let errors: Vec<_> = ret.diagnostics.errors().cloned().collect();
+        return Err(diagnostic_error(path, source, &errors));
+    }
+    let record = &ret.module_record;
+    if !record.has_module_syntax && record.import_metas.is_empty() {
+        return Ok(None);
+    }
+    let specifiers = record
+        .requested_modules
+        .iter()
+        .filter(|(_, requests)| requests.iter().any(|r| !r.is_type))
+        .map(|(specifier, _)| specifier.to_string())
+        .collect();
+    Ok(Some(specifiers))
+}
+
 /// Cheap check used for `.js` files inside `node_modules`: returns `false` when the
 /// text certainly has no ESM syntax (so it can be loaded as CommonJS without parsing).
 pub fn may_have_module_syntax(source: &str) -> bool {

@@ -205,13 +205,15 @@ function dirnameOf(filename) {
   return filename.slice(0, i);
 }
 
-function makeRequire(filename) {
+// `jitiGeneration`: the module belongs to a jiti generation (src/loader.rs), so `require` loads
+// the way the jiti instance's does.
+function makeRequire(filename, jitiGeneration) {
   const require = function require(id) {
     if (typeof id !== "string") {
       throw new TypeError(`The "id" argument must be of type string. Received ${typeof id}`);
     }
     if (id === "") throw new TypeError("The argument 'id' must be a non-empty string. Received ''");
-    return ops.require(id, filename);
+    return ops.require(id, filename, jitiGeneration);
   };
   const resolve = function resolve(id) {
     return ops.requireResolve(String(id), filename, false);
@@ -242,9 +244,9 @@ function makeRequire(filename) {
   return require;
 }
 internal.makeRequire = makeRequire;
-hidden(globalThis, Symbol.for("pi-jsrt.createRequire"), (filename) => makeRequire(filename));
+hidden(globalThis, Symbol.for("pi-jsrt.createRequire"), (filename, jitiGeneration) => makeRequire(filename, jitiGeneration));
 
-internal.createCjsModule = (filename) => {
+internal.createCjsModule = (filename, jitiGeneration) => {
   const module = {
     id: filename,
     path: dirnameOf(filename),
@@ -255,8 +257,9 @@ internal.createCjsModule = (filename) => {
     paths: [],
     parent: null,
   };
-  module.require = makeRequire(filename);
-  requireCache[filename] = module;
+  module.require = makeRequire(filename, jitiGeneration);
+  // Like jiti, modules it loads itself stay out of the shared CommonJS cache.
+  if (jitiGeneration === undefined) requireCache[filename] = module;
   return module;
 };
 
