@@ -694,6 +694,24 @@ fn extract_codex_event_error(event: &Value) -> (Option<String>, Option<String>) 
     (code, message)
 }
 
+/// pi-rs divergence (CX-13): the friendly usage-limit text for an `error` event with code
+/// `usage_limit_reached`, built by the same formatter as an HTTP error body
+/// ([`parse_error_response`]). TypeScript builds it only on the HTTP path, so the default
+/// WebSocket transport showed the terse `Codex error: <message>` without plan or reset time.
+fn websocket_usage_limit_message(event: &Value, code: Option<&str>) -> Option<String> {
+    const USAGE_LIMIT_REACHED: &str = "usage_limit_reached";
+    // The fields sit in a nested `error` object or, in the flat form, on the event itself; the
+    // backend names the kind in `error.code` or, like the HTTP body, in `error.type`.
+    let nested = event.get("error").filter(|e| e.is_object());
+    let nested_type = nested.and_then(|e| e.get("type")).and_then(Value::as_str);
+    if code != Some(USAGE_LIMIT_REACHED) && nested_type != Some(USAGE_LIMIT_REACHED) {
+        return None;
+    }
+    let error = nested.cloned().unwrap_or_else(|| event.clone());
+    let raw = json!({ "error": error }).to_string();
+    parse_error_response(0, "", &raw).friendly_message
+}
+
 enum MappedEvent {
     /// A normal event for the Responses processor.
     Event(Value),
@@ -715,6 +733,14 @@ fn map_codex_event(event: Value, output: &mut AssistantMessage) -> anyhow::Resul
     match event_type.as_str() {
         "error" => {
             let (code, message) = extract_codex_event_error(&event);
+            if let Some(friendly) = websocket_usage_limit_message(&event, code.as_deref()) {
+                return Err(CodexApiError {
+                    message: friendly,
+                    code,
+                    payload: Some(event),
+                }
+                .into());
+            }
             let detail = message
                 .filter(|m| !m.is_empty())
                 .or_else(|| code.clone().filter(|c| !c.is_empty()))

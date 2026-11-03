@@ -2266,3 +2266,163 @@ async fn does_not_hold_login_behind_an_older_stalled_network_catalog_refresh() {
     let result = tokio::time::timeout(Duration::from_secs(5), stalled_refresh).await.expect("stalled refresh settles").unwrap().unwrap();
     assert!(!result.aborted);
 }
+
+// ---------------------------------------------------------------------------
+// pi-rs divergence (CX-16): one forced token refresh and retry on a Codex 401
+// ---------------------------------------------------------------------------
+
+/// A Codex-shaped access token (the backend reads the account id from its payload).
+fn codex_token(signature: &str) -> String {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(json!({ "https://api.openai.com/auth": { "chatgpt_account_id": "acc_test" } }).to_string());
+    format!("aaa.{payload}.{signature}")
+}
+
+fn codex_completed_sse() -> String {
+    [
+        json!({ "type": "response.output_item.added", "item": { "type": "message", "id": "msg_1", "role": "assistant", "status": "in_progress", "content": [] } }),
+        json!({ "type": "response.content_part.added", "part": { "type": "output_text", "text": "" } }),
+        json!({ "type": "response.output_text.delta", "delta": "Hello" }),
+        json!({ "type": "response.output_item.done", "item": { "type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "Hello" }] } }),
+        json!({ "type": "response.completed", "response": { "status": "completed", "usage": { "input_tokens": 5, "output_tokens": 3, "total_tokens": 8 } } }),
+    ]
+    .iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
+}
+
+fn codex_unauthorized() -> mock_http::Response {
+    mock_http::Response::json(
+        401,
+        json!({ "error": { "message": "Your authentication token has been invalidated.", "code": "token_invalidated" } }),
+    )
+}
+
+/// A Codex-API extension provider signed in with OAuth whose stored access token is `old` (not
+/// expired); its refresh hands out `new`, or fails when `new` is `None`.
+async fn codex_oauth_runtime(
+    base_url: &str,
+    new: Option<String>,
+    refreshes: Arc<AtomicUsize>,
+) -> (Arc<ModelRuntime>, Arc<AuthStorage>, Model) {
+    let storage = auth_storage(&[("codex-oauth", oauth(&codex_token("old"), "refresh", now_ms() + 3_600_000))]);
+    let runtime = runtime_with(storage.clone()).await;
+    let config = ProviderOAuthConfig {
+        refresh_token: Arc::new(move |credential, _signal| {
+            refreshes.fetch_add(1, Ordering::SeqCst);
+            let new = new.clone();
+            async move {
+                match new {
+                    Some(access) => Ok(OAuthCredentials { access, expires: now_ms() + 3_600_000, ..credential }),
+                    None => Err(anyhow::anyhow!("refresh token revoked")),
+                }
+            }
+            .boxed()
+        }),
+        ..extension_oauth_config(None, Some(true))
+    };
+    runtime
+        .register_provider(
+            "codex-oauth",
+            &ProviderConfig {
+                name: Some("Codex OAuth".into()),
+                base_url: Some(base_url.into()),
+                api: Some("openai-codex-responses".into()),
+                oauth: Some(config),
+                models: Some(vec![chat_config("codex-model")]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(runtime.is_using_o_auth("codex-oauth"));
+    let model = runtime.get_model("codex-oauth", "codex-model").expect("registered model");
+    (runtime, storage, model)
+}
+
+fn codex_request() -> Option<ModelsRequestOptions> {
+    Some(ModelsRequestOptions::from(StreamOptions { transport: Some(Transport::Sse), ..Default::default() }))
+}
+
+fn codex_context() -> Context {
+    Context { system_prompt: None, messages: vec![Message::User(UserMessage::new("hi", 1))], tools: None }
+}
+
+#[tokio::test]
+async fn codex_401_forces_one_token_refresh_and_retries_once() {
+    let server = mock_http::MockServer::start(|_, index| match index {
+        0 => codex_unauthorized(),
+        _ => mock_http::Response::sse(&codex_completed_sse()),
+    })
+    .await;
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let (runtime, storage, model) =
+        codex_oauth_runtime(&server.url, Some(codex_token("new")), refreshes.clone()).await;
+
+    let message = runtime.complete_simple(model, codex_context(), codex_request()).await;
+
+    assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+    assert_eq!(message.text(), "Hello");
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("authorization"), Some(format!("Bearer {}", codex_token("old")).as_str()));
+    assert_eq!(requests[1].header("authorization"), Some(format!("Bearer {}", codex_token("new")).as_str()));
+    // The refreshed credential was persisted through the credential store.
+    let Some(Credential::OAuth(stored)) = storage.read("codex-oauth", None).await.unwrap() else {
+        panic!("stored OAuth credential")
+    };
+    assert_eq!(stored.access, codex_token("new"));
+}
+
+#[tokio::test]
+async fn codex_second_401_surfaces_the_relogin_message_without_looping() {
+    let server = mock_http::MockServer::start(|_, _| codex_unauthorized()).await;
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let (runtime, _storage, model) =
+        codex_oauth_runtime(&server.url, Some(codex_token("new")), refreshes.clone()).await;
+
+    let message = runtime.complete_simple(model, codex_context(), codex_request()).await;
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some(
+            "Authentication failed for \"codex-oauth\". Credentials may have expired or network is unavailable. Run '/login codex-oauth' to re-authenticate."
+        )
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn codex_401_with_a_failing_refresh_surfaces_the_relogin_message() {
+    let server = mock_http::MockServer::start(|_, _| codex_unauthorized()).await;
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let (runtime, _storage, model) = codex_oauth_runtime(&server.url, None, refreshes.clone()).await;
+
+    let message = runtime.complete_simple(model, codex_context(), codex_request()).await;
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert!(message.error_message.as_deref().unwrap_or_default().starts_with("Authentication failed for \"codex-oauth\""));
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn codex_errors_other_than_401_are_not_retried_with_a_refresh() {
+    let server = mock_http::MockServer::start(|_, _| {
+        mock_http::Response::json(400, json!({ "error": { "message": "Bad request body" } }))
+    })
+    .await;
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let (runtime, _storage, model) =
+        codex_oauth_runtime(&server.url, Some(codex_token("new")), refreshes.clone()).await;
+
+    let message = runtime.complete_simple(model, codex_context(), codex_request()).await;
+
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(message.error_message.as_deref(), Some("Bad request body"));
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests().len(), 1);
+}

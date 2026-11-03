@@ -1030,6 +1030,33 @@ impl Models {
         race_with_signal(operation, &signal).await
     }
 
+    /// Refresh `provider_id`'s stored OAuth credential after the backend rejected its access
+    /// token `rejected_access` (HTTP 401), even though the token has not expired yet.
+    ///
+    /// pi-rs addition (CX-16; TypeScript never refreshes after a 401). The refresh runs through
+    /// the same locked read-modify-write as an expiry refresh: when the stored access token no
+    /// longer equals `rejected_access` (another process already refreshed), nothing is
+    /// refreshed and the caller simply resolves auth again.
+    pub async fn refresh_rejected_oauth_credential(
+        &self,
+        provider_id: &str,
+        rejected_access: &str,
+        signal: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let Some(provider) = self.get_provider(provider_id) else { return Ok(()) };
+        let Some(oauth) = provider.auth().oauth.clone() else { return Ok(()) };
+        let rejected = rejected_access.to_string();
+        refresh_stored_oauth_credential(
+            &self.inner.credentials,
+            provider_id,
+            &oauth,
+            Arc::new(move |current| current.access == rejected),
+            signal,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Resolve provider-scoped auth by provider id. `None` when unknown or unconfigured.
     pub async fn get_auth(&self, provider_id: &str, overrides: AuthResolutionOverrides) -> anyhow::Result<Option<AuthResult>> {
         let Some(provider) = self.get_provider(provider_id) else { return Ok(None) };

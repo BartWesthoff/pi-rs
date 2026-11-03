@@ -30,6 +30,10 @@ fn is_retryable_provider_error(error: &ProviderHttpError) -> bool {
         Some("false") => return false,
         _ => {}
     }
+    // pi-rs divergence (LM-04): nothing listens on the loopback port; a retry cannot succeed.
+    if error.is_local_connection_refused() {
+        return false;
+    }
     match error.status {
         None => true,
         Some(status) => status == 408 || status == 409 || status == 429 || status >= 500,

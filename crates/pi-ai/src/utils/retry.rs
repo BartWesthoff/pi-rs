@@ -237,5 +237,10 @@ pub fn is_retryable_assistant_error(message: &AssistantMessage) -> bool {
     if NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.is_match(error_message) {
         return false;
     }
+    // pi-rs divergence (LM-04): a refused loopback connection means the local server is not
+    // running; the auto-retry backoff (~14 s by default) would only delay the error.
+    if crate::utils::error_body::is_local_connection_refused_message(error_message) {
+        return false;
+    }
     RETRYABLE_PROVIDER_ERROR_PATTERN.is_match(error_message) || contains_retryable_status_code(error_message)
 }
