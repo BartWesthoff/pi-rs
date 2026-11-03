@@ -6,6 +6,7 @@ use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::http::{FetchTerminated, NetworkError};
+use crate::transport::{HttpResponse, ResponseBody, TransportError};
 
 /// One decoded server-sent event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,7 +170,7 @@ pub struct SseReader<S> {
 
 impl<S> SseReader<S>
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    S: Stream<Item = Result<Bytes, TransportError>> + Unpin,
 {
     pub fn new(body: S, signal: Option<CancellationToken>) -> Self {
         Self { body, decoder: SseDecoder::new(), queue: Default::default(), done: false, signal }
@@ -210,24 +211,21 @@ where
 /// A failed body read as undici reports it: `fetch` resolved, then the stream rejected with
 /// `TypeError: terminated` (a dropped connection, or no data within the idle timeout, whose
 /// undici cause is a `BodyTimeoutError`). Retry classification matches that message.
-fn body_read_error(error: &reqwest::Error) -> FetchTerminated {
+pub(crate) fn body_read_error(error: &TransportError) -> FetchTerminated {
     let cause = if error.is_timeout() {
         NetworkError {
             code: Some("UND_ERR_BODY_TIMEOUT"),
             message: "Body Timeout Error".into(),
         }
     } else {
-        NetworkError::from_reqwest(error)
+        error.network_error()
     };
     FetchTerminated { cause }
 }
 
-/// Read SSE events from a reqwest response.
-pub fn sse_reader(
-    response: reqwest::Response,
-    signal: Option<CancellationToken>,
-) -> SseReader<impl Stream<Item = Result<Bytes, reqwest::Error>> + Unpin> {
-    SseReader::new(Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())), signal)
+/// Read SSE events from a transport response.
+pub fn sse_reader(response: HttpResponse, signal: Option<CancellationToken>) -> SseReader<ResponseBody> {
+    SseReader::new(response.body, signal)
 }
 
 #[cfg(test)]

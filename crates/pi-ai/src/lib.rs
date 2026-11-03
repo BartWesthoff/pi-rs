@@ -19,6 +19,7 @@ pub mod serde_util;
 pub mod session_resources;
 pub mod shared_vec;
 pub mod telemetry;
+pub mod transport;
 pub mod types;
 pub mod utils;
 

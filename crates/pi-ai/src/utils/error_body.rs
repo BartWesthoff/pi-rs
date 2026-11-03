@@ -127,6 +127,16 @@ impl ProviderHttpError {
             // simply not running, so name its address instead of the SDKs' bare message.
             Self::connection(message)
         } else {
+            Self::connection("Connection error.")
+        }
+    }
+
+    /// Map a [`TransportError`](crate::transport::TransportError) to the SDK's connection error
+    /// messages.
+    pub fn from_transport(error: &crate::transport::TransportError) -> Self {
+        if error.is_timeout() {
+            Self::timed_out()
+        } else {
             // Like the SDKs' APIConnectionError: the cause is not part of the message.
             Self::connection("Connection error.")
         }

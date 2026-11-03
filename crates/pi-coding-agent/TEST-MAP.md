@@ -396,7 +396,7 @@ Shorter tables for the other packages against their crates. Files that need prov
 | `error-body.test.ts` | 16 | COVERED | `pi-ai/tests/ts_ported/errors.rs` | SDK-shape probes (Mistral body field, Bedrock $response streams, class-instance bodies) collapse into one Rust ProviderHttpError; its cases are ported |
 | `event-stream.test.ts` | 9 | COVERED | `pi-ai/tests/types_serde.rs`: event_stream_delivers_events_and_result<br>`pi-ai/src/utils/event_stream.rs` (whole file)<br>+1 more files |  |
 | `faux-provider.test.ts` | 24 | COVERED | `pi-ai/tests/faux_provider.rs`: aborting_before_first_chunk, aborting_mid_text_stream, counts_cached_characters_up_to_first_difference, deferred_responses +12 more<br>`pi-ai/tests/compat.rs` (whole file) |  |
-| `fetch-option.test.ts` | 6 | COVERED | `pi-ai/tests/ts_ported/misc.rs` | the custom fetch is a custom reqwest::Client (StreamOptions.http_client); Google adapters reject custom clients, so the TS globalThis.fetch case is not portable |
+| `fetch-option.test.ts` | 6 | COVERED | `pi-ai/tests/ts_ported/misc.rs` | the custom fetch is a custom `pi_ai::transport::HttpTransport` (StreamOptions.http_transport; `with_http_client` wraps a reqwest::Client); Google adapters reject custom transports, so the TS globalThis.fetch case is not portable |
 | `fireworks-model-generation.test.ts` | 4 | PARTIAL | `pi-ai/tests/ts_ported/catalog.rs` | runtime case ported; the other cases run scripts/generate-models.ts (catalog generator, not part of the Rust port) |
 | `fireworks-models.test.ts` | 16 | COVERED | `pi-ai/tests/ts_ported/providers.rs` | unit file (not E2E) |
 | `generate-models-strict.test.ts` | 1 | NOT PORTABLE |  | runs scripts/generate-models.ts (catalog generator, not part of the Rust port) |

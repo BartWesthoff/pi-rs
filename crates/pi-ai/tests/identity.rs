@@ -466,7 +466,7 @@ async fn sends_the_open_code_session_header_to_custom_providers_pointing_at_open
             headers
         });
         let options = StreamOptions {
-            http_client: Some(client),
+            http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(client))),
             session_id: Some("session-1".into()),
             headers: request_headers,
             ..Default::default()

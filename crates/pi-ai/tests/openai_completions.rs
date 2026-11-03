@@ -612,7 +612,7 @@ async fn idle_body_timeout_mid_stream_fails_like_undici_terminated() {
         .build()
         .unwrap();
     let options = StreamOptions {
-        http_client: Some(client),
+        http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(client))),
         ..local_options()
     };
     let (_, result) =

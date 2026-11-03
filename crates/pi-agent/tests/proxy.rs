@@ -68,7 +68,9 @@ fn options(proxy_url: String) -> ProxyStreamOptions {
     ProxyStreamOptions {
         auth_token: "test-token".into(),
         proxy_url,
-        http_client: Some(reqwest::Client::builder().no_proxy().build().unwrap()),
+        http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        ))),
         ..Default::default()
     }
 }

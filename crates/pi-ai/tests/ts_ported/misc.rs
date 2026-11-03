@@ -466,7 +466,7 @@ fn custom_client(port: u16) -> reqwest::Client {
 async fn custom_http_clients_carry_every_http_adapter() {
     let server = MockServer::start(|_, _| Response::json(401, json!({"error": {"message": "upstream rejected request"}}))).await;
     let port: u16 = server.url.rsplit(':').next().unwrap().parse().unwrap();
-    let options = |key: String| StreamOptions { api_key: Some(key), http_client: Some(custom_client(port)), max_retries: Some(0), ..Default::default() };
+    let options = |key: String| StreamOptions { api_key: Some(key), http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(custom_client(port)))), max_retries: Some(0), ..Default::default() };
     let context = normalize_context(&user_ctx("hello"));
     let codex_key = {
         use base64::Engine;

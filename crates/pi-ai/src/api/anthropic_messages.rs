@@ -27,7 +27,8 @@ use crate::utils::diagnostics::{AssistantMessageDiagnostic, DiagnosticErrorInfo,
 use crate::utils::error_body::{ProviderHttpError, SdkErrorStyle};
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::headers_to_record;
-use crate::utils::http::{HeaderList, client_for, post_json, stainless_headers};
+use crate::transport::http_transport_for;
+use crate::utils::http::{HeaderList, post_json, stainless_headers};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::json_parse::parse_json_with_repair;
 use crate::utils::streaming_json::ToolCallArgumentsStream;
@@ -926,10 +927,7 @@ async fn run_stream(
             build_client_config(&model, api_key.as_deref(), &options, dynamic_headers.as_ref(), cache_session_id, timeout_ms);
         let is_oauth = client_config.is_oauth;
         let url = messages_url(&model.base_url);
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = http_transport_for(&url, &options)?;
         // The SDK exchanges the identity token itself, caches the access token per federation
         // client, and appends the OAuth beta to requests it authenticates.
         let token_cache = federation.as_ref().map(|config| {
@@ -976,7 +974,7 @@ async fn run_stream(
             let attempt = retry_provider_request(
                 || {
                     let mut headers = headers.clone();
-                    let (client, url, params, signal, token_cache) = (&client, &url, &params, signal.as_ref(), token_cache.clone());
+                    let (client, url, params, signal, token_cache) = (&*client, &url, &params, signal.as_ref(), token_cache.clone());
                     async move {
                         if let Some(cache) = &token_cache {
                             let token = cache.get_token().await?;
@@ -1035,7 +1033,7 @@ async fn run_stream(
 
         if let Some(on_response) = &options.on_response {
             on_response(
-                ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) },
+                ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) },
                 model.clone(),
             )
             .await;

@@ -32,7 +32,7 @@ use crate::types::{
 use crate::utils::error_body::SdkErrorStyle;
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::headers_to_record;
-use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, client_for, post_json};
+use crate::utils::http::{HeaderList, apply_openai_custom_headers_env, post_json};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{ProviderRetryOptions, retry_provider_request};
 use crate::utils::transcript::{get_declared_tools, resolve_transcript, resolve_transcript_tools};
@@ -229,10 +229,7 @@ async fn run_stream(
         url.query_pairs_mut()
             .append_pair("api-version", &api_version);
         let url = url.to_string();
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = crate::transport::http_transport_for(&url, &options)?;
         let retry = ProviderRetryOptions {
             max_retries: options.max_retries,
             max_retry_delay_ms: options.max_retry_delay_ms,
@@ -242,7 +239,7 @@ async fn run_stream(
         let response = retry_provider_request(
             || {
                 post_json(
-                    &client,
+                    &*client,
                     &url,
                     &headers,
                     &params,
@@ -257,8 +254,8 @@ async fn run_stream(
         if let Some(on_response) = &options.on_response {
             on_response(
                 ProviderResponse {
-                    status: response.status().as_u16(),
-                    headers: headers_to_record(response.headers()),
+                    status: response.status,
+                    headers: headers_to_record(&response.headers),
                 },
                 model.clone(),
             )

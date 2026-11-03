@@ -617,7 +617,7 @@ async fn payload_only(
     context: &TranscriptContext,
     mut options: StreamOptions,
 ) -> Value {
-    options.http_client = Some(refusing_client());
+    options.http_transport = Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(refusing_client())));
     let captured = capture_payload(&mut options);
     let _ = openai_responses::stream(model, context, options)
         .result()
@@ -1222,7 +1222,7 @@ async fn azure_payload(
     mut options: StreamOptions,
     simple: bool,
 ) -> Value {
-    options.http_client = Some(refusing_client());
+    options.http_transport = Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(refusing_client())));
     let captured = capture_payload(&mut options);
     let stream = if simple {
         azure_openai_responses::stream_simple(model, context, options)
