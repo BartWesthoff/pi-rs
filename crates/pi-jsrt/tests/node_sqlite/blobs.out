@@ -1,0 +1,18 @@
+put uint8: {"lastInsertRowid":1,"changes":1}
+put buffer: {"lastInsertRowid":2,"changes":1}
+put dataview: {"lastInsertRowid":3,"changes":1}
+put int16: {"lastInsertRowid":4,"changes":1}
+put float64: {"lastInsertRowid":5,"changes":1}
+put subarray: {"lastInsertRowid":6,"changes":1}
+put empty: {"lastInsertRowid":7,"changes":1}
+put uint8clamped: {"lastInsertRowid":8,"changes":1}
+rows: [{"[null]":{"id":1,"data":{"Uint8Array":[1,2,3]},"t":"blob","n":3,"h":"010203"}},{"[null]":{"id":2,"data":{"Uint8Array":[104,105]},"t":"blob","n":2,"h":"6869"}},{"[null]":{"id":3,"data":{"Uint8Array":[7,6,5]},"t":"blob","n":3,"h":"070605"}},{"[null]":{"id":4,"data":{"Uint8Array":[1,0,255,255]},"t":"blob","n":4,"h":"0100FFFF"}},{"[null]":{"id":5,"data":{"Uint8Array":[0,0,0,0,0,0,248,63]},"t":"blob","n":8,"h":"000000000000F83F"}},{"[null]":{"id":6,"data":{"Uint8Array":[4,3,2]},"t":"blob","n":3,"h":"040302"}},{"[null]":{"id":7,"data":{"Uint8Array":[]},"t":"blob","n":0,"h":""}},{"[null]":{"id":8,"data":{"Uint8Array":[255,0]},"t":"blob","n":2,"h":"FF00"}}]
+result is Uint8Array: true
+fresh copy: {"[null]":{"h":"010203"}}
+arraybuffer rejected: {"ok":{"lastInsertRowid":9,"changes":1}}
+literals: {"[null]":{"a":{"Uint8Array":[0,255]},"z":{"Uint8Array":[0,0,0]},"e":{"Uint8Array":[]},"c":{"Uint8Array":[97,98]},"t":"hi"}}
+blob with nul as text: {"[null]":{"t":"a"}}
+invalid utf8 text: {"[null]":{"t":"�a"}}
+1 MiB round trip: true
+blob in named: {"[null]":{"h":"CAFE"}}
+udf returns view: {"[null]":{"h":"0405","t":"blob"}}

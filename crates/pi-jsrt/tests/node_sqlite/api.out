@@ -1,0 +1,98 @@
+exports: ["DatabaseSync","StatementSync","backup","constants","default"]
+require: ["DatabaseSync","StatementSync","backup","constants"]
+constants: {"SQLITE_CHANGESET_OMIT":0,"SQLITE_CHANGESET_REPLACE":1,"SQLITE_CHANGESET_ABORT":2,"SQLITE_CHANGESET_DATA":1,"SQLITE_CHANGESET_NOTFOUND":2,"SQLITE_CHANGESET_CONFLICT":3,"SQLITE_CHANGESET_CONSTRAINT":4,"SQLITE_CHANGESET_FOREIGN_KEY":5}
+db proto: {"open":"functionEWC","close":"functionEWC","prepare":"functionEWC","exec":"functionEWC","function":"functionEWC","location":"functionEWC","aggregate":"functionEWC","createSession":"functionEWC","applyChangeset":"functionEWC","enableLoadExtension":"functionEWC","loadExtension":"functionEWC","constructor":"functionWC"}
+stmt proto: {"iterate":"functionEWC","all":"functionEWC","get":"functionEWC","run":"functionEWC","columns":"functionEWC","setAllowBareNamedParameters":"functionEWC","setAllowUnknownNamedParameters":"functionEWC","setReadBigInts":"functionEWC","setReturnArrays":"functionEWC","constructor":"functionWC"}
+dispose: "function"
+lengths: [0,2,"DatabaseSync","StatementSync","backup"]
+db own: {"isOpen":"getE","isTransaction":"getE","Symbol(sqlite-type)":"stringEWC"}
+sqlite-type: "node:sqlite"
+instanceof: true
+call without new: {"error":{"name":"TypeError","message":"Cannot call constructor without `new`","code":"ERR_CONSTRUCT_CALL_REQUIRED"}}
+illegal statement: {"error":{"name":"Error","message":"Illegal constructor","code":"ERR_ILLEGAL_CONSTRUCTOR"}}
+illegal invocation: {"error":{"name":"TypeError","message":"Illegal invocation"}}
+path type: {"error":{"name":"TypeError","message":"The \"path\" argument must be a string, Uint8Array, or URL without null bytes.","code":"ERR_INVALID_ARG_TYPE"}}
+path nul: {"error":{"name":"TypeError","message":"The \"path\" argument must be a string, Uint8Array, or URL without null bytes.","code":"ERR_INVALID_ARG_TYPE"}}
+options type: {"error":{"name":"TypeError","message":"The \"options\" argument must be an object.","code":"ERR_INVALID_ARG_TYPE"}}
+options undefined: {"error":{"name":"TypeError","message":"The \"options\" argument must be an object.","code":"ERR_INVALID_ARG_TYPE"}}
+option open: {"error":{"name":"TypeError","message":"The \"options.open\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option readOnly: {"error":{"name":"TypeError","message":"The \"options.readOnly\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option enableForeignKeyConstraints: {"error":{"name":"TypeError","message":"The \"options.enableForeignKeyConstraints\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option enableDoubleQuotedStringLiterals: {"error":{"name":"TypeError","message":"The \"options.enableDoubleQuotedStringLiterals\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option allowExtension: {"error":{"name":"TypeError","message":"The \"options.allowExtension\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option readBigInts: {"error":{"name":"TypeError","message":"The \"options.readBigInts\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option returnArrays: {"error":{"name":"TypeError","message":"The \"options.returnArrays\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option allowBareNamedParameters: {"error":{"name":"TypeError","message":"The \"options.allowBareNamedParameters\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+option allowUnknownNamedParameters: {"error":{"name":"TypeError","message":"The \"options.allowUnknownNamedParameters\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+buffer path: {"ok":true}
+dqs default: {"error":{"name":"Error","message":"no such column: \"nope\" - should this be a string literal in single-quotes?","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+dqs enabled: {"ok":{"[null]":{"v":"yes"}}}
+fk default: {"error":{"name":"TypeError","message":"The \"options\" argument must be an object.","code":"ERR_INVALID_ARG_TYPE"}}
+fk off: {"ok":[{"[null]":{"foreign_keys":0}},{"lastInsertRowid":1,"changes":1}]}
+stmt own: {"sourceSQL":"getE","expandedSQL":"getE"}
+run: {"lastInsertRowid":1,"changes":1}
+run result proto: true
+run bigints: {"lastInsertRowid":"3n","changes":"1n"}
+run update: {"lastInsertRowid":3,"changes":3}
+run select: {"lastInsertRowid":3,"changes":3}
+constraint: {"error":{"name":"Error","message":"NOT NULL constraint failed: t.name","code":"ERR_SQLITE_ERROR","errcode":1299,"errstr":"constraint failed"}}
+columns: [{"[null]":{"column":"id","database":"main","name":"id","table":"t","type":"INTEGER"}},{"[null]":{"column":"name","database":"main","name":"label","table":"t","type":"TEXT"}},{"[null]":{"column":null,"database":null,"name":"doubled","table":null,"type":null}},{"[null]":{"column":null,"database":null,"name":"one","table":null,"type":null}},{"[null]":{"column":"big","database":"main","name":"big","table":"t","type":"INTEGER"}}]
+columns empty: []
+too large number: {"error":{"name":"RangeError","message":"Value is too large to be represented as a JavaScript number: 1152921504606846976","code":"ERR_OUT_OF_RANGE"}}
+read bigints: [{"[null]":{"id":"1n","big":"1152921504606846976n"}},{"[null]":{"id":"2n","big":"1n"}},{"[null]":{"id":"3n","big":"0n"}}]
+read bigints get: {"[null]":{"id":"1n","big":"1152921504606846976n"}}
+arrays: [["1n","1152921504606846976n"],["2n","1n"],["3n","0n"]]
+get arrays: ["1n","1152921504606846976n"]
+setter type: {"error":{"name":"TypeError","message":"The \"returnArrays\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+setter readBigInts type: {"error":{"name":"TypeError","message":"The \"readBigInts\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+options readBigInts returnArrays: [["1n","x"],[["1n"]],{"lastInsertRowid":"0n","changes":"0n"}]
+duplicate column names: {"[null]":{"a":2,"b":3}}
+no columns get: undefined
+get no rows: undefined
+all no rows: []
+prepare error: {"error":{"name":"Error","message":"near \"SELEC\": syntax error","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+prepare type: {"error":{"name":"TypeError","message":"The \"sql\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+location memory: null
+location type: {"error":{"name":"TypeError","message":"The \"dbName\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+transaction: [false,true,false]
+load extension disabled: {"error":{"name":"Error","message":"extension loading is not allowed","code":"ERR_INVALID_STATE"}}
+enable extension disabled: {"error":{"name":"Error","message":"Cannot enable extension loading because it was disabled at database creation.","code":"ERR_INVALID_STATE"}}
+enable extension type: {"error":{"name":"TypeError","message":"The \"allow\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+disable extension: {}
+load extension missing: {"error":{"name":"Error","message":"<tmp>/missing-ext.so: cannot open shared object file: No such file or directory","code":"ERR_LOAD_SQLITE_EXTENSION"}}
+load extension path type: {"error":{"name":"TypeError","message":"The \"path\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+load extension after disable: {"error":{"name":"Error","message":"extension loading is not allowed","code":"ERR_INVALID_STATE"}}
+open twice: {"error":{"name":"Error","message":"database is already open","code":"ERR_INVALID_STATE"}}
+isOpen: false
+isTransaction closed: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}
+close twice: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}
+finalized get: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized all: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized run: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized iterate: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized columns: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized setReadBigInts: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized sourceSQL: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+finalized expandedSQL: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+prepare closed: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}
+location closed: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}
+reopen: [true,{"[null]":{"two":2}}]
+old statement stays finalized: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+dispose closes: false
+dispose twice ok: false
+open false: [false,{"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}]
+session: {"ok":"function"}
+backup pages: true
+backup progress: [true,[["totalPages","remainingPages"],true]]
+backup copy: {"[null]":{"n":2000}}
+backup default rate: true
+backup progress throws: "stop"
+backup bad target: {"message":"unknown database nope","code":"ERR_SQLITE_ERROR","errcode":1}
+backup bad dest: {"message":"unable to open database file","code":"ERR_SQLITE_ERROR","errcode":14}
+backup arg dest: {"error":{"name":"TypeError","message":"The \"destination\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+backup arg options: {"error":{"name":"TypeError","message":"The \"options\" argument must be an object.","code":"ERR_INVALID_ARG_TYPE"}}
+backup arg rate: {"error":{"name":"TypeError","message":"The \"options.rate\" argument must be an integer.","code":"ERR_INVALID_ARG_TYPE"}}
+backup arg source: {"error":{"name":"TypeError","message":"The \"options.source\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+backup arg target: {"error":{"name":"TypeError","message":"The \"options.target\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+backup arg progress: {"error":{"name":"TypeError","message":"The \"options.progress\" argument must be a function.","code":"ERR_INVALID_ARG_TYPE"}}
+backup closed db: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}

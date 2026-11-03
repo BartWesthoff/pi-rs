@@ -1,0 +1,55 @@
+arg types: {"ok":{"[null]":{"r":"number,number,string,bytes,null,number"}}}
+arg too large: {"error":{"name":"RangeError","message":"Value is too large to be represented as a JavaScript number: 9007199254740993","code":"ERR_OUT_OF_RANGE"}}
+bigint args: {"ok":{"[null]":{"r":"bigint,bigint,number"}}}
+arity: [{"ok":{"[null]":{"r":3}}},{"error":{"name":"Error","message":"wrong number of arguments to function addf()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}]
+return int: {"ok":{"[null]":{"r":3,"t":"real"}}}
+return real: {"ok":{"[null]":{"r":1.5,"t":"real"}}}
+return text: {"ok":{"[null]":{"r":"t","t":"text"}}}
+return big: {"ok":{"[null]":{"r":5,"t":"integer"}}}
+return bigmax: {"error":{"name":"Error","message":"BigInt value is too large for SQLite","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+return blob: {"ok":{"[null]":{"r":{"Uint8Array":[1]},"t":"blob"}}}
+return nul: {"ok":{"[null]":{"r":null,"t":"null"}}}
+return undef: {"ok":{"[null]":{"r":null,"t":"null"}}}
+return bool: {"error":{"name":"Error","message":"Returned JavaScript value cannot be converted to a SQLite value","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+return obj: {"error":{"name":"Error","message":"Returned JavaScript value cannot be converted to a SQLite value","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+return promise: {"error":{"name":"Error","message":"Asynchronous user-defined functions are not supported","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+return nan: {"ok":{"[null]":{"r":null,"t":"null"}}}
+throws: {"error":{"name":"RangeError","message":"from js"}}
+throws in exec: {"error":{"name":"RangeError","message":"from js"}}
+same error object: true
+throws string: "plain"
+after throw works: {"ok":{"[null]":{"r":5}}}
+receiver: {"ok":{"[null]":{"r":"undefined"}}}
+redefine: {"[null]":{"r":12}}
+deterministic index: {}
+non-deterministic index: {"error":{"name":"Error","message":"non-deterministic functions prohibited in index expressions","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+directOnly direct: {"ok":{"[null]":{"r":1}}}
+directOnly in view: {"error":{"name":"Error","message":"unsafe use of direct()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+bad options: {"error":{"name":"TypeError","message":"The \"options.varargs\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+bad options type: {"error":{"name":"TypeError","message":"The \"options\" argument must be an object.","code":"ERR_INVALID_ARG_TYPE"}}
+bad name: {"error":{"name":"TypeError","message":"The \"name\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+bad fn: {"error":{"name":"TypeError","message":"The \"function\" argument must be a function.","code":"ERR_INVALID_ARG_TYPE"}}
+too many args: {"error":{"name":"Error","message":"wrong number of arguments to function many()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+aggregate: {"ok":{"[null]":{"r":21}}}
+aggregate empty: {"ok":{"[null]":{"r":0}}}
+aggregate grouped: {"ok":[{"[null]":{"k":0,"r":12}},{"[null]":{"k":1,"r":9}}]}
+start fn and result: {"ok":{"[null]":{"r":"1|2|3|4|5|6"}}}
+fresh start per group: {"ok":[{"[null]":{"k":0,"r":"2|4|6"}},{"[null]":{"k":1,"r":"1|3|5"}}]}
+window: {"ok":[{"[null]":{"v":1,"r":1}},{"[null]":{"v":2,"r":3}},{"[null]":{"v":3,"r":5}},{"[null]":{"v":4,"r":7}},{"[null]":{"v":5,"r":9}},{"[null]":{"v":6,"r":11}}]}
+not a window: {"error":{"name":"Error","message":"sumint() may not be used as a window function","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+window result: {"ok":[{"[null]":{"r":"total:1"}},{"[null]":{"r":"total:3"}},{"[null]":{"r":"total:6"}},{"[null]":{"r":"total:9"}},{"[null]":{"r":"total:12"}},{"[null]":{"r":"total:15"}}]}
+window as aggregate: {"ok":{"[null]":{"r":"total:21"}}}
+multi arg: {"ok":{"[null]":{"r":210}}}
+multi arity: {"error":{"name":"Error","message":"wrong number of arguments to function multi()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+varargs aggregate: {"ok":{"[null]":{"r":18}}}
+bigint aggregate: {"ok":{"[null]":{"r":21,"t":"integer"}}}
+step throws: {"error":{"name":"Error","message":"wrong number of arguments to function stepthrows()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+start throws: {"error":{"name":"Error","message":"wrong number of arguments to function startthrows()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+result throws: {"error":{"name":"Error","message":"wrong number of arguments to function resultthrows()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+object state result: {"error":{"name":"Error","message":"wrong number of arguments to function objstate()","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+aggregate no start: {"error":{"name":"TypeError","message":"The \"options.start\" argument must be a function or a primitive value.","code":"ERR_INVALID_ARG_TYPE"}}
+aggregate null start: {"ok":{"[null]":{"r":21}}}
+aggregate bad step: {"error":{"name":"TypeError","message":"The \"options.step\" argument must be a function.","code":"ERR_INVALID_ARG_TYPE"}}
+aggregate bad inverse: {"error":{"name":"TypeError","message":"The \"options.inverse\" argument must be a function.","code":"ERR_INVALID_ARG_TYPE"}}
+aggregate bad flag: {"error":{"name":"TypeError","message":"The \"options.directOnly\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+function closed: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}

@@ -1,0 +1,48 @@
+anonymous: {"ok":{"[null]":{"a":1,"b":"two"}}}
+numbered: {"ok":{"[null]":{"a":"y","b":"x"}}}
+colon: {"ok":{"[null]":{"a":1}}}
+dollar: {"ok":{"[null]":{"a":2}}}
+at: {"ok":{"[null]":{"a":3}}}
+bare: {"ok":{"[null]":{"a":1,"b":2,"c":3}}}
+prefixed and bare: {"ok":{"[null]":{"a":2}}}
+unknown: {"error":{"name":"Error","message":"Unknown named parameter 'z'","code":"ERR_INVALID_STATE"}}
+missing named binds null: {"ok":{"[null]":{"a":1,"b":null}}}
+conflict: {"error":{"name":"Error","message":"Cannot create bare named parameter 'k' because of conflicting names '$k' and '@k'.","code":"ERR_INVALID_STATE"}}
+conflict prefixed: {"error":{"name":"Error","message":"Cannot create bare named parameter 'k' because of conflicting names '$k' and '@k'.","code":"ERR_INVALID_STATE"}}
+mixed: {"ok":{"[null]":{"n":"named","a":1,"b":2}}}
+anonymous skips named: {"ok":{"[null]":{"a":1,"n":0,"b":2}}}
+too many: {"error":{"name":"Error","message":"column index out of range","code":"ERR_SQLITE_ERROR","errcode":25,"errstr":"column index out of range"}}
+too few: {"ok":{"[null]":{"a":1,"b":null}}}
+named after anonymous: {"error":{"name":"TypeError","message":"Provided value cannot be bound to SQLite parameter 2.","code":"ERR_INVALID_ARG_TYPE"}}
+array as named: {"error":{"name":"Error","message":"Unknown named parameter '0'","code":"ERR_INVALID_STATE"}}
+undefined: {"error":{"name":"TypeError","message":"Provided value cannot be bound to SQLite parameter 1.","code":"ERR_INVALID_ARG_TYPE"}}
+boolean: {"error":{"name":"TypeError","message":"Provided value cannot be bound to SQLite parameter 1.","code":"ERR_INVALID_ARG_TYPE"}}
+symbol: {"error":{"name":"TypeError","message":"Provided value cannot be bound to SQLite parameter 1.","code":"ERR_INVALID_ARG_TYPE"}}
+function as named: {"ok":{"[null]":{"a":1}}}
+date: {"ok":{"[null]":{"a":null}}}
+bigint: {"ok":{"[null]":{"a":5,"t":"integer"}}}
+bigint max: {"error":{"name":"RangeError","message":"Value is too large to be represented as a JavaScript number: 9223372036854775807","code":"ERR_OUT_OF_RANGE"}}
+bigint too large: {"error":{"name":"TypeError","message":"BigInt value is too large to bind.","code":"ERR_INVALID_ARG_VALUE"}}
+number kinds: {"ok":{"[null]":{"a":"real","b":"real","c":null,"d":0}}}
+infinity: {"ok":{"[null]":{"a":null}}}
+string with nul: {"ok":{"[null]":{"n":1,"h":"610062"}}}
+lone surrogate: {"ok":{"[null]":{"h":"EFBFBD"}}}
+unicode: {"ok":{"[null]":{"s":"héllo 🌍","n":7}}}
+symbol key ignored: {"ok":{"[null]":{"a":1}}}
+non-enumerable ignored: {"ok":{"[null]":{"a":null}}}
+inherited ignored: {"ok":{"[null]":{"a":null}}}
+getter: {"ok":{"[null]":{"a":1,"b":2}}}
+getter order: ["b","a"]
+bare disabled: {"error":{"name":"Error","message":"Unknown named parameter 'a'","code":"ERR_INVALID_STATE"}}
+bare disabled prefixed: {"ok":{"[null]":{"a":1}}}
+unknown allowed: {"ok":{"[null]":{"a":1}}}
+setter type: {"error":{"name":"TypeError","message":"The \"enabled\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+setter type bare: {"error":{"name":"TypeError","message":"The \"allowBareNamedParameters\" argument must be a boolean.","code":"ERR_INVALID_ARG_TYPE"}}
+options bare off: {"ok":{"[null]":{"a":null}}}
+options unknown on: {"ok":{"[null]":{"a":1}}}
+conflict first: {"error":{"name":"Error","message":"Cannot create bare named parameter 'k' because of conflicting names '$k' and '@k'.","code":"ERR_INVALID_STATE"}}
+conflict cached: {"ok":{"[null]":{"a":1,"b":null}}}
+rebinding clears: [{"[null]":{"a":1,"b":2}},{"[null]":{"a":null,"b":null}},{"[null]":{"a":null,"b":null}}]
+expandedSQL: "SELECT 'it''s', 1.25, 7, x'01ff'"
+expandedSQL unbound: "SELECT NULL, NULL"
+sourceSQL: "  SELECT 1  "
