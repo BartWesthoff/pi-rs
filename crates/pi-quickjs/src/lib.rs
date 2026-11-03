@@ -82,6 +82,9 @@ pub mod ext {
         pub fn JS_SetGlobalObject(ctx: *mut JSContext, obj: JSValue);
         /// Install the clock of `Date`.
         pub fn JS_SetDateNowFunc(rt: *mut JSRuntime, func: Option<DateNow>, opaque: *mut c_void);
+        /// Wake the threads of `rt` blocked in `Atomics.wait`; from then on `Atomics.wait` throws
+        /// an uncatchable "interrupted" error in `rt`. Callable from any thread while `rt` lives.
+        pub fn JS_InterruptAtomicsWait(rt: *mut JSRuntime);
         /// `require()` of an ES module: load, link and evaluate `filename` synchronously without
         /// running promise jobs. `*status` receives one of the `JS_REQUIRE_MODULE_*` values.
         pub fn JS_RequireModule(
@@ -166,6 +169,10 @@ impl Engine {
             if options.max_stack_size > 0 {
                 qjs::JS_SetMaxStackSize(rt, options.max_stack_size as _);
             }
+            // Every SharedArrayBuffer's memory comes from the process-wide refcounted allocator,
+            // so engines on other threads can share it (see [`SharedMemory`]). Installed before
+            // any script runs: QuickJS frees every shared buffer with `sab_free`.
+            qjs::JS_SetSharedArrayBufferFunctions(rt, &sab_functions());
         }
         let fn_class =
             unsafe { register_class(rt, c"Function", Some(fn_finalizer), None, Some(fn_call)) };
@@ -210,6 +217,13 @@ impl Engine {
     /// Raw runtime pointer.
     pub fn raw_runtime(&self) -> *mut qjs::JSRuntime {
         self.data.rt
+    }
+
+    /// Whether `Atomics.wait` may block this engine's thread (QuickJS's default is no: it
+    /// throws "cannot block in this thread").
+    pub fn set_can_block(&self, can_block: bool) {
+        // SAFETY: the runtime is alive while `self` is.
+        unsafe { qjs::JS_SetCanBlock(self.data.rt, can_block) };
     }
 
     /// Drop everything stored with [`Context::insert_data`].
@@ -2860,6 +2874,199 @@ impl From<JsArrayBuffer> for JsValue {
 impl From<JsArrayBuffer> for JsObject {
     fn from(a: JsArrayBuffer) -> Self {
         a.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SharedArrayBuffer memory shared between engines
+// ---------------------------------------------------------------------------
+
+/// Bytes in front of every shared block: its [`SabHeader`], padded to the block's alignment.
+const SAB_HEADER: usize = 16;
+/// Alignment of shared blocks (and so of their data): enough for every typed array element.
+const SAB_ALIGN: usize = 16;
+
+/// The refcount and size stored in front of a shared block's data.
+#[repr(C)]
+struct SabHeader {
+    refs: std::sync::atomic::AtomicUsize,
+    size: usize,
+}
+
+const _: () = assert!(std::mem::size_of::<SabHeader>() <= SAB_HEADER);
+
+/// The allocator hooks (QuickJS copies them into the runtime).
+fn sab_functions() -> qjs::JSSharedArrayBufferFunctions {
+    qjs::JSSharedArrayBufferFunctions {
+        sab_alloc: Some(sab_alloc),
+        sab_free: Some(sab_free),
+        sab_dup: Some(sab_dup),
+        sab_opaque: ptr::null_mut(),
+    }
+}
+
+fn sab_layout(size: usize) -> Option<std::alloc::Layout> {
+    std::alloc::Layout::from_size_align(size.checked_add(SAB_HEADER)?, SAB_ALIGN).ok()
+}
+
+/// # Safety
+/// `data` must be a live block from [`sab_alloc`].
+unsafe fn sab_header<'a>(data: *mut c_void) -> &'a SabHeader {
+    // SAFETY: `sab_alloc` wrote a header `SAB_HEADER` bytes before every block it returns.
+    unsafe { &*((data as *mut u8).sub(SAB_HEADER) as *const SabHeader) }
+}
+
+/// A zeroed block with one reference.
+unsafe extern "C" fn sab_alloc(_opaque: *mut c_void, size: qjs::size_t) -> *mut c_void {
+    let size = size as usize;
+    let Some(layout) = sab_layout(size) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the layout is never zero-sized (it includes the header).
+    let base = unsafe { std::alloc::alloc_zeroed(layout) };
+    if base.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `base` is valid for the header, aligned to `SAB_ALIGN`.
+    unsafe {
+        (base as *mut SabHeader).write(SabHeader {
+            refs: std::sync::atomic::AtomicUsize::new(1),
+            size,
+        });
+        base.add(SAB_HEADER) as *mut c_void
+    }
+}
+
+unsafe extern "C" fn sab_dup(_opaque: *mut c_void, data: *mut c_void) {
+    // SAFETY: QuickJS only dups blocks it holds a reference to.
+    let header = unsafe { sab_header(data) };
+    header
+        .refs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+unsafe extern "C" fn sab_free(_opaque: *mut c_void, data: *mut c_void) {
+    // SAFETY: the caller gives up one reference to a live block.
+    unsafe { sab_release(data) }
+}
+
+/// Drop one reference to a block; the last one frees it.
+///
+/// # Safety
+/// `data` must be a live block from [`sab_alloc`] and the caller must own one reference.
+unsafe fn sab_release(data: *mut c_void) {
+    use std::sync::atomic::{Ordering, fence};
+    // SAFETY: the block is live while the caller holds its reference.
+    let header = unsafe { sab_header(data) };
+    if header.refs.fetch_sub(1, Ordering::Release) != 1 {
+        return;
+    }
+    fence(Ordering::Acquire);
+    let layout = sab_layout(header.size).expect("layout was valid at allocation");
+    // SAFETY: this was the last reference; the block was allocated with this layout.
+    unsafe { std::alloc::dealloc((data as *mut u8).sub(SAB_HEADER), layout) };
+}
+
+/// One reference to the memory of a `SharedArrayBuffer`, which can cross threads and become a
+/// `SharedArrayBuffer` of another engine viewing the same bytes (Node's shared backing store).
+///
+/// The memory lives while any engine's `SharedArrayBuffer` or any `SharedMemory` refers to it.
+#[derive(Debug)]
+pub struct SharedMemory {
+    data: ptr::NonNull<u8>,
+    len: usize,
+    max_len: Option<usize>,
+}
+
+// SAFETY: the block is refcounted atomically and never moves; access to its bytes from JS goes
+// through `Atomics` or is a data race the program itself allows, as with any SharedArrayBuffer.
+unsafe impl Send for SharedMemory {}
+// SAFETY: see `Send`; `&SharedMemory` only exposes the address and lengths.
+unsafe impl Sync for SharedMemory {}
+
+impl SharedMemory {
+    /// The memory of `value` when it is a `SharedArrayBuffer` of this engine.
+    pub fn from_value(value: &JsValue, ctx: &mut Context) -> JsResult<Option<SharedMemory>> {
+        let Some(obj) = value.as_object() else {
+            return Ok(None);
+        };
+        // SAFETY: plain class checks on a live value.
+        if unsafe { qjs::JS_IsArrayBuffer(obj.0.0) } {
+            return Ok(None);
+        }
+        let mut len: qjs::size_t = 0;
+        // SAFETY: `obj` is live; a non-buffer leaves an exception we clear below.
+        let data = unsafe { qjs::JS_GetArrayBuffer(ctx.raw, &mut len, obj.0.0) };
+        let Some(data) = ptr::NonNull::new(data) else {
+            // Not an (attached) buffer: drop the pending TypeError.
+            drop(take_exception(ctx));
+            return Ok(None);
+        };
+        let growable = obj.get("growable", ctx)?.to_boolean();
+        let max_len = if growable {
+            Some(obj.get("maxByteLength", ctx)?.to_number(ctx)? as usize)
+        } else {
+            None
+        };
+        // SAFETY: every SharedArrayBuffer's data comes from `sab_alloc` (installed by
+        // `Engine::new`), and the buffer keeps it alive while we take our reference.
+        unsafe { sab_dup(ptr::null_mut(), data.as_ptr() as *mut c_void) };
+        Ok(Some(SharedMemory {
+            data,
+            len: len as usize,
+            max_len,
+        }))
+    }
+
+    /// A new `SharedArrayBuffer` of this engine over the same memory.
+    pub fn to_js(&self, ctx: &mut Context) -> JsResult<JsValue> {
+        // SAFETY: QuickJS takes its own reference (`sab_dup`) and releases it with `sab_free`.
+        let v = unsafe {
+            qjs::JS_NewArrayBuffer(
+                ctx.raw,
+                self.data.as_ptr(),
+                self.len as _,
+                self.max_len.unwrap_or(0) as _,
+                None,
+                ptr::null_mut(),
+                true,
+            )
+        };
+        check(ctx.raw, v)
+    }
+
+    /// The address of the first byte.
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.data.as_ptr()
+    }
+
+    /// The byte length when the reference was taken.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Clone for SharedMemory {
+    fn clone(&self) -> Self {
+        // SAFETY: we hold a reference, so the block is live.
+        unsafe { sab_dup(ptr::null_mut(), self.data.as_ptr() as *mut c_void) };
+        SharedMemory {
+            data: self.data,
+            len: self.len,
+            max_len: self.max_len,
+        }
+    }
+}
+
+impl Drop for SharedMemory {
+    fn drop(&mut self) {
+        // SAFETY: we own one reference.
+        unsafe { sab_release(self.data.as_ptr() as *mut c_void) };
     }
 }
 

@@ -1173,6 +1173,9 @@ pub(crate) fn thread_main(init: ThreadInit, ready: std::sync::mpsc::SyncSender<R
             return;
         }
     };
+    // `Atomics.wait` may block every runtime's thread, the main one included (as in Node).
+    engine.set_can_block(true);
+    let atomics = shared.attach_atomics(&engine);
     let mut ctx = engine.context();
     let loader = Rc::new(crate::loader::Loader::new(shared.clone()));
     crate::loader::install(&engine, loader.clone());
@@ -1239,6 +1242,7 @@ pub(crate) fn thread_main(init: ThreadInit, ready: std::sync::mpsc::SyncSender<R
     TIMEZONE.with(|t| t.borrow_mut().take());
     drop(st);
     drop(loader);
+    drop(atomics);
     drop(engine);
 }
 

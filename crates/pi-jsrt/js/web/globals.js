@@ -95,6 +95,7 @@ function cloneError(message) {
 function structuredClone(value, options = undefined) {
   const seen = new Map();
   const transfer = new Set(options?.transfer ?? []);
+  for (const t of transfer) if (t instanceof SharedArrayBuffer) throw cloneError("Found invalid value in transferList.");
   const clone = (v) => {
     if (v === null || typeof v !== "object") {
       if (typeof v === "function") throw cloneError(`${v.toString().slice(0, 60)} could not be cloned.`);
@@ -115,6 +116,8 @@ function structuredClone(value, options = undefined) {
     else if (v instanceof Number) out = new Number(v.valueOf());
     else if (v instanceof String) out = new String(v.valueOf());
     else if (v instanceof ArrayBuffer) out = transfer.has(v) ? v : v.slice(0);
+    // A clone of a SharedArrayBuffer is another object over the same memory.
+    else if (v instanceof SharedArrayBuffer) out = ops.sabAlias(v);
     else if (ArrayBuffer.isView(v)) {
       const buf = clone(v.buffer);
       if (v instanceof DataView) out = new DataView(buf, v.byteOffset, v.byteLength);
@@ -158,6 +161,72 @@ function structuredClone(value, options = undefined) {
   return clone(value);
 }
 internal.hidden(globalThis, "structuredClone", structuredClone);
+
+// ---------------------------------------------------------------------------
+// Atomics.waitAsync (src/ops/atomics.rs). QuickJS provides wait/notify across runtimes; the
+// async waiters live in the host and `notify` wakes them after the blocked threads.
+// ---------------------------------------------------------------------------
+
+const asyncWaiters = new Map(); // waiter id -> { resolve, timer }
+
+function describeTypedArray(v) {
+  return v !== null && typeof v === "object" ? Object.prototype.toString.call(v) : String(v);
+}
+
+function atomicIndex(typedArray, index) {
+  const n = Math.trunc(Number(index)) || 0;
+  if (n < 0 || n >= typedArray.length) throw new RangeError("Invalid atomic access index");
+  return n;
+}
+
+function waitAsync(typedArray, index, value, timeout) {
+  const bigint = typedArray instanceof BigInt64Array;
+  if (!(typedArray instanceof Int32Array) && !bigint) {
+    throw new TypeError(`${describeTypedArray(typedArray)} is not an int32 or BigInt64 typed array.`);
+  }
+  if (!(typedArray.buffer instanceof SharedArrayBuffer)) throw new TypeError(`${describeTypedArray(typedArray)} is not a shared typed array.`);
+  const i = atomicIndex(typedArray, index);
+  const v = bigint ? BigInt.asIntN(64, value) : value | 0;
+  let t = Number(timeout);
+  t = Number.isNaN(t) ? Infinity : Math.max(t, 0);
+  const id = ops.atomicsWaitAsync(typedArray, i, v, t === 0);
+  if (typeof id === "string") return { async: false, value: id };
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  const entry = { resolve, timer: undefined };
+  if (t !== Infinity) {
+    // As in Node, a pending waitAsync does not keep the event loop alive.
+    entry.timer = setTimeout(() => {
+      if (!ops.atomicsCancelWait(id)) return;
+      asyncWaiters.delete(id);
+      resolve("timed-out");
+    }, t);
+    entry.timer?.unref?.();
+  }
+  asyncWaiters.set(id, entry);
+  return { async: true, value: promise };
+}
+
+internal.atomicsWake = (id, result) => {
+  const entry = asyncWaiters.get(id);
+  if (!entry) return;
+  asyncWaiters.delete(id);
+  if (entry.timer !== undefined) clearTimeout(entry.timer);
+  entry.resolve(result);
+};
+
+const syncNotify = Atomics.notify;
+function notify(typedArray, index, count) {
+  let n = syncNotify(typedArray, index, count);
+  if (!(typedArray.buffer instanceof SharedArrayBuffer)) return n;
+  const c = count === undefined ? Infinity : Math.max(Math.trunc(Number(count)) || 0, 0);
+  if (c > n) n += ops.atomicsNotify(typedArray, atomicIndex(typedArray, index), c - n);
+  return n;
+}
+
+for (const [name, value] of [["waitAsync", waitAsync], ["notify", notify]]) {
+  Object.defineProperty(Atomics, name, { value, writable: true, enumerable: false, configurable: true });
+}
 
 // ---------------------------------------------------------------------------
 // performance

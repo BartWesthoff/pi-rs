@@ -486,8 +486,18 @@ function fatal(err) {
 internal.fatal = fatal;
 
 internal.onUncaught = (kind, err, promise) => {
-  // After process.exit() in a worker, the ERR_PROCESS_EXIT unwinding is not an error.
+  // After process.exit() in a worker, the ERR_PROCESS_EXIT unwinding is not an error, including
+  // when a listener below calls process.exit() (synckit's crash guard does).
   if (internal.workerExiting) return true;
+  try {
+    return offerUncaught(kind, err, promise);
+  } catch (thrown) {
+    if (internal.workerExiting) return true;
+    throw thrown;
+  }
+};
+
+function offerUncaught(kind, err, promise) {
   if (kind === "unhandledRejection") {
     if (process.listenerCount("unhandledRejection") > 0) {
       process.emit("unhandledRejection", err, promise);
@@ -524,7 +534,7 @@ internal.onUncaught = (kind, err, promise) => {
     return true;
   }
   return false;
-};
+}
 
 // ---------------------------------------------------------------------------
 // Node mode (src/node.rs): main module, beforeExit/exit
