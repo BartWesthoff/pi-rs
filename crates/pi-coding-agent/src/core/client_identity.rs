@@ -21,3 +21,25 @@ pub fn get_client_identity(settings_manager: Arc<SettingsManager>) -> ClientIden
         attribution: Some(attribution),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Map, Value, json};
+
+    fn settings(json: Value) -> Arc<SettingsManager> {
+        let Value::Object(map) = json else { unreachable!() };
+        SettingsManager::in_memory_json(map as Map<String, Value>, None)
+    }
+
+    // pi-rs divergence from TS Pi: with the default (off) setting no provider attribution is sent.
+    #[test]
+    fn attribution_follows_the_telemetry_setting() {
+        if std::env::var_os("PI_TELEMETRY").is_some() {
+            return; // the env var overrides the setting
+        }
+        assert_eq!(get_client_identity(settings(json!({}))).attribution, Some(None));
+        let on = get_client_identity(settings(json!({ "enableInstallTelemetry": true })));
+        assert!(on.attribution.is_some_and(|attribution| attribution.is_some()));
+    }
+}

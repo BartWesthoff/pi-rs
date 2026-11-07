@@ -1042,7 +1042,8 @@ impl SettingsSelectorComponent {
             setting(
                 "install-telemetry",
                 "Install telemetry",
-                "Send an anonymous version/update ping after changelog-detected updates",
+                "Off by default in this build. Send an anonymous version/update ping after changelog-detected updates",
+                // pi-rs divergence from TS Pi: telemetry is opt-in.
                 bool_str(config.enable_install_telemetry),
                 &["true", "false"],
             ),

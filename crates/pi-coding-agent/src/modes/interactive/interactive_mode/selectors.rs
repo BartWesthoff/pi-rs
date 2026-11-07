@@ -615,17 +615,11 @@ impl Inner {
         }
     }
 
-    async fn find_exact_model_match(&self, search_term: &str) -> Option<Model> {
-        let session = self.session();
-        let scoped = session.scoped_models();
-        let cached: Vec<Model> = if !scoped.is_empty() {
-            scoped.iter().map(|s| s.model.clone()).collect()
-        } else {
-            session.model_runtime().get_available_snapshot()
-        };
-        let cached_match = find_exact_model_reference_match(search_term, &cached);
-        if cached_match.is_some() || !scoped.is_empty() {
-            return cached_match;
+    /// pi-rs divergence from TS Pi: the catalog refresh is on demand only. This is what `/refresh-models` runs.
+    pub(crate) async fn handle_refresh_models_command(self: Arc<Self>) {
+        if std::env::var_os("PI_OFFLINE").is_some_and(|v| !v.is_empty()) {
+            self.show_warning("Offline mode: model catalogs were not refreshed.");
+            return;
         }
         self.show_status("Refreshing model catalogs…");
         let signal = CancellationToken::new();
@@ -639,25 +633,42 @@ impl Inner {
                 signal.cancel();
             })
         };
-        match refresh_model_catalogs(&session.model_runtime(), signal).await {
+        let result = refresh_model_catalogs(&self.session().model_runtime(), signal).await;
+        timer.abort();
+        match result {
             Ok(result) => {
                 if result.aborted && timed_out.load(Ordering::SeqCst) {
-                    self.show_warning("Model refresh timed out; searching cached models.");
+                    self.show_warning("Model refresh timed out; showing cached models.");
                 } else if !result.errors.is_empty() {
                     self.show_warning(&format!(
-                        "Could not refresh {}; searching cached models.",
+                        "Could not refresh {}; showing cached models.",
                         result.errors.keys().cloned().collect::<Vec<_>>().join(", ")
                     ));
+                } else {
+                    self.update_available_provider_count();
+                    self.footer.invalidate();
+                    self.show_status("Model catalogs refreshed.");
                 }
             }
             Err(error) => self.show_warning(&if timed_out.load(Ordering::SeqCst) {
-                "Model refresh timed out; searching cached models.".to_string()
+                "Model refresh timed out; showing cached models.".to_string()
             } else {
                 format!("Could not refresh model catalogs: {error}")
             }),
         }
-        timer.abort();
-        find_exact_model_reference_match(search_term, &session.model_runtime().get_available_snapshot())
+        self.request_render();
+    }
+
+    async fn find_exact_model_match(&self, search_term: &str) -> Option<Model> {
+        let session = self.session();
+        let scoped = session.scoped_models();
+        let cached: Vec<Model> = if !scoped.is_empty() {
+            scoped.iter().map(|s| s.model.clone()).collect()
+        } else {
+            session.model_runtime().get_available_snapshot()
+        };
+        // pi-rs divergence from TS Pi: never fetch catalogs just because `/model <ref>` missed the cache.
+        find_exact_model_reference_match(search_term, &cached)
     }
 
     pub(crate) fn maybe_save_implicit_project_trust_after_reload(&self) -> bool {

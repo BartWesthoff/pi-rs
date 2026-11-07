@@ -64,6 +64,11 @@ pub static BUILTIN_SLASH_COMMANDS: LazyLock<Vec<BuiltinSlashCommand>> = LazyLock
             None,
         ),
         cmd(
+            "refresh-models",
+            "Refresh model catalogs now (no startup fetch)",
+            None,
+        ),
+        cmd(
             "export",
             "Export session (HTML default, or specify path: .html/.jsonl)",
             None,

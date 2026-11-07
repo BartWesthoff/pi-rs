@@ -119,7 +119,7 @@ Authenticate with `/login openrouter` or `OPENROUTER_API_KEY`.
 
 With a key, Pi lists only the OpenRouter chat models that key may use, with the key's context size, max output, and prices. These come from OpenRouter's `/models/user` endpoint and reflect guardrails and provider restrictions set in OpenRouter. Image and classifier models are not filtered.
 
-Pi refreshes the list in the background at startup in interactive mode, when `/model` opens, after `/login`, and on `pi update --models`. The last list is saved and used offline and in `pi -p` and RPC mode. After switching keys outside `/login`, the previous key's list stays until the next refresh.
+Pi refreshes the list after `/login`, on `/refresh-models`, on `/scoped-models`, and on `pi update --models`. It is not refreshed at startup or when `/model` opens, so a start with default settings contacts no provider. The last list is saved and used offline and in `pi -p` and RPC mode. After switching keys outside `/login`, the previous key's list stays until the next refresh.
 
 Regional endpoints filter models to their region. To use one, set the base URL in [`models.json`](models.md#configure-a-compatible-endpoint):
 

@@ -64,8 +64,8 @@ async fn capture_options(model: &Model, options: CaptureOptions) -> SimpleStream
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     let settings_manager = SettingsManager::create(&cwd, Some(&agent_dir), None);
-    if options.telemetry_enabled == Some(false) {
-        settings_manager.set_enable_install_telemetry(false);
+    if let Some(enabled) = options.telemetry_enabled {
+        settings_manager.set_enable_install_telemetry(enabled);
     }
     let mut credentials: IndexMap<String, Credential> = IndexMap::new();
     credentials.insert(
@@ -180,11 +180,20 @@ async fn with_telemetry_env<F: std::future::Future<Output = ()>>(value: Option<&
     }
 }
 
+// pi-rs divergence from TS Pi: install telemetry defaults to off, so attribution now needs the
+// setting enabled instead of being on by default.
 #[tokio::test]
 async fn identifies_pi_with_a_detailed_user_agent_and_attribution_as_a_cli_agent() {
     with_telemetry_env(None, async {
         let model = create_model("openrouter", "https://openrouter.ai/api/v1");
-        let options = capture_options(&model, CaptureOptions::default()).await;
+        let options = capture_options(
+            &model,
+            CaptureOptions {
+                telemetry_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
 
         assert_eq!(
             identity_json(&options),
@@ -198,6 +207,18 @@ async fn identifies_pi_with_a_detailed_user_agent_and_attribution_as_a_cli_agent
                 "X-OpenRouter-Categories": "cli-agent",
             })
         );
+    })
+    .await;
+}
+
+// pi-rs divergence from TS Pi: the default setting is off, so a default session sends no attribution.
+#[tokio::test]
+async fn default_settings_send_no_attribution() {
+    with_telemetry_env(None, async {
+        let model = create_model("openrouter", "https://openrouter.ai/api/v1");
+        let options = capture_options(&model, CaptureOptions::default()).await;
+        assert_eq!(identity_json(&options)["attribution"], Value::Null);
+        assert_eq!(attribution_headers(&model, &options), json!({}));
     })
     .await;
 }

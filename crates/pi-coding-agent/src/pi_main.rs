@@ -1293,18 +1293,8 @@ pub async fn main(args: &[String], options: Option<&MainOptions>) -> anyhow::Res
         exit(1);
     }
 
-    // RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
-    if !offline_mode && app_mode == AppMode::Rpc {
-        let model_runtime = model_runtime.clone();
-        crate::utils::uncaught::spawn(async move {
-            let _ = model_runtime
-                .refresh(Some(pi_ai::models::ModelsRefreshOptions {
-                    signal: Some(timeout_signal(15_000)),
-                    ..Default::default()
-                }))
-                .await;
-        });
-    }
+    // pi-rs divergence from TS Pi: no startup catalog refresh in RPC mode either; the embedded catalog is the
+    // default and `pi update --models` (or interactive `/refresh-models`) refreshes it on demand.
 
     match app_mode {
         AppMode::Rpc => {

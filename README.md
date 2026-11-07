@@ -160,6 +160,15 @@ Behavior that still differs from TypeScript pi, and why:
   with a tool call, the request fails, or compaction is recovering from context overflow) pi-rs
   falls back to TypeScript's standalone requests. The setting defaults off for every other
   provider and model, where the requests are byte-identical to TypeScript's.
+- **Startup privacy.** Nothing contacts pi.dev (or any provider catalog) just because Pi starts.
+  Install telemetry is opt-in: `enableInstallTelemetry` defaults to `false` here, so the anonymous
+  install/update ping and the selected provider attribution headers stay off until you turn them on
+  or set `PI_TELEMETRY=1`.
+- **Model catalog refresh is manual.** The bundled catalog is the default. Startup and opening
+  `/model` do not fetch catalogs; run `/refresh-models`, open `/scoped-models`, `/login`, or run
+  `pi update --models` to refresh.
+- **No startup package update check.** Pi checks for newer packages only when you run `pi update`
+  (or a package command that refreshes), not on every start.
 - **Unverified.** The Bedrock error text when a stream is aborted mid-response (HTTP/2 close) has
   not been compared with the AWS SDK.
 

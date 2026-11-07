@@ -115,6 +115,7 @@ const GETTERS = [
 	["getShellCommandPrefix", (s) => s.getShellCommandPrefix()],
 	["getNpmCommand", (s) => s.getNpmCommand()],
 	["getCollapseChangelog", (s) => s.getCollapseChangelog()],
+	// pi-rs diverges: this fork defaults to false, so the generated fixtures were adjusted by hand.
 	["getEnableInstallTelemetry", (s) => s.getEnableInstallTelemetry()],
 	["getEnableAnalytics", (s) => s.getEnableAnalytics()],
 	["getPackages", (s) => s.getPackages()],
