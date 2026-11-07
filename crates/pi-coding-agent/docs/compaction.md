@@ -137,6 +137,20 @@ Never cut at tool results (they must stay with their tool call).
 
 Preparation advances the kept boundary into a context-invisible suffix only when that suffix contains an omitted assistant attempt and no unomitted context-producing entries. Recovery `context_edit` omissions satisfy this rule; intrinsically context-invisible metadata may coexist with them. Metadata alone and newly appended custom messages do not move the cut. A replacement edit affecting the candidate input or summarized prefix also blocks advancement because the omitted assistant answered the pre-edit input; replacements of suffix entries that are ultimately omitted remain safe. This allows an over-budget recovered input to be summarized while retaining the edits that keep the abandoned attempt omitted, without making bookkeeping change whether new model input is preserved verbatim.
 
+### Chat-Prefix Summary Requests
+
+pi-rs divergence (LM-19). With `compaction.reuseChatPrefix`, the summary request is the chat itself: the messages the last chat request sent, unchanged and in the same order, plus one final user message with the summarization instruction, and the chat's own `tools` declaration. A local `openai-completions` server keeps the chat's KV cache across the two requests, so only the instruction is prefilled (measured: 263–879 new prompt tokens and 142–273 ms prefill, against 2.6K–11.2K tokens and 384–3,006 ms for the standalone request).
+
+The setting resolves per compaction:
+
+| Value | Behavior |
+|---|---|
+| unset | on for `openai-completions` models whose base URL is a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`); off everywhere else |
+| `true` | replay the chat prefix, for any model |
+| `false` | TypeScript's standalone requests, byte for byte |
+
+The standalone shape stays in use whenever the replay cannot work or its answer is unusable: recovery from context overflow (the chat no longer fits), a compaction whose summary goes to a model other than the chat's own (no cached chat state), and an answer that is a tool call, an error, or was aborted. Those fallbacks then send TypeScript's history and turn-prefix summaries, so the result matches TypeScript's. In the recorded comparison (synthetic ~70k-token sessions on LFM3 and Bonsai, both shapes judged against the same rubric) the replay scored at least as well as the standalone request in every pair: 9/10 vs 9/10 four times, 7/10 vs 0/10 once (the standalone run hit the token cap). It is the default on those servers for that reason.
+
 ### CompactionEntry Structure
 
 Defined in [`session-manager.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/session-manager.ts):

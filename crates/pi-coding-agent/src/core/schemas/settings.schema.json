@@ -116,6 +116,10 @@
           "maximum": 9007199254740991,
           "default": 20000
         },
+        "reuseChatPrefix": {
+          "type": "boolean",
+          "description": "Summarize by replaying the chat as the request prefix so a local server reuses its KV cache (pi-rs divergence LM-19). Defaults on for openai-completions models on loopback hosts."
+        },
         "modelOverrides": {
           "type": "object",
           "patternProperties": {

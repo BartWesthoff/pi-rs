@@ -5,6 +5,10 @@
 //!   message are sent byte for byte as before, and the `tools` declaration does not change.
 //!   Re-setting the same active tools in another order (as packages calling `setActiveTools` do)
 //!   must not rewrite the head (#11495).
+//! - Compaction with `compaction.reuseChatPrefix` (pi-rs divergence, LM-19): the summary
+//!   request extends the last chat request byte for byte (one instruction message more, the
+//!   chat's tools) and falls back to TS Pi's standalone requests when its answer is unusable;
+//!   without the setting the summary requests stay TS Pi's standalone requests.
 //! - Esc during prefill (before the response head) and while a tool call's arguments stream:
 //!   the turn ends aborted, the partial tool call never runs, the session file stays valid JSONL
 //!   and the session continues.
@@ -104,6 +108,14 @@ impl LocalSetup {
     }
 
     async fn session(&self, session_manager: Arc<SessionManager>) -> Arc<AgentSession> {
+        self.session_with_settings(session_manager, serde_json::Map::new()).await
+    }
+
+    async fn session_with_settings(
+        &self,
+        session_manager: Arc<SessionManager>,
+        settings: serde_json::Map<String, Value>,
+    ) -> Arc<AgentSession> {
         let model = ModelRegistry::new(self.runtime.clone()).find("local-llama", "local-model").expect("models.json model");
         create_agent_session(Some(&CreateAgentSessionOptions {
             cwd: Some(self.cwd().to_string_lossy().into_owned()),
@@ -111,7 +123,7 @@ impl LocalSetup {
             model_runtime: Some(self.runtime.clone()),
             model: Some(model),
             thinking_level: Some(ThinkingLevel::Medium),
-            settings_manager: Some(SettingsManager::in_memory(None, None)),
+            settings_manager: Some(SettingsManager::in_memory_json(settings, None)),
             session_manager: Some(session_manager),
             ..Default::default()
         }))
@@ -274,6 +286,122 @@ async fn local_completions_requests_extend_a_byte_stable_prefix_across_turns() {
     let instructions = last["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "developer" || m["role"] == "system");
     assert_eq!(instructions.count(), 1);
     session.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// Compaction summaries that reuse the chat prefix (LM-19)
+// ---------------------------------------------------------------------------
+
+const CHAT_PREFIX_INSTRUCTION: &str = "Stop working on the conversation above.";
+
+/// Chat turns as in [`tool_turn_reply`]; every later request (a summary) gets `summary(index)`.
+async fn compacted_session(
+    reuse_chat_prefix: Option<bool>,
+    summary: impl Fn(usize) -> Response + Send + Sync + 'static,
+) -> (MockServer, Vec<String>) {
+    let server = MockServer::start(move |_request: &Request, index| {
+        if index < TURNS * 2 { tool_turn_reply(index) } else { summary(index) }
+    })
+    .await;
+    let setup = LocalSetup::new(&server.url).await;
+    let mut compaction = json!({"keepRecentTokens": 1});
+    if let Some(reuse) = reuse_chat_prefix {
+        compaction["reuseChatPrefix"] = json!(reuse);
+    }
+    let settings = json!({"compaction": compaction}).as_object().unwrap().clone();
+    let cwd = setup.cwd().to_string_lossy().into_owned();
+    let session = setup
+        .session_with_settings(SessionManager::in_memory(Some(&cwd), None, None).unwrap(), settings)
+        .await;
+    for turn in 0..TURNS {
+        session.prompt(&format!("Turn {turn}: summarize notes.txt"), None).await.unwrap();
+    }
+    let result = session.compact(None).await.unwrap();
+    session.dispose();
+    let bodies: Vec<String> = server.requests().iter().map(Request::text).collect();
+    (server, std::iter::once(result.summary).chain(bodies).collect())
+}
+
+#[tokio::test]
+async fn reuse_chat_prefix_summary_extends_the_chat_request_byte_for_byte() {
+    let (_server, results) = compacted_session(Some(true), |index| text_reply(&format!("## Goal\nsummary {index}"))).await;
+    let (summary, bodies) = (&results[0], &results[1..]);
+    // One summary request, although keepRecentTokens 1 splits the last turn.
+    assert_eq!(bodies.len(), TURNS * 2 + 1, "{bodies:#?}");
+    let (chat, request) = (&bodies[TURNS * 2 - 1], &bodies[TURNS * 2]);
+    // Like the next chat turn: the last chat request's messages byte for byte, then more.
+    let prefix = reusable_prefix(chat);
+    assert!(request.starts_with(prefix), "the summary request does not extend the chat request\nchat:    {prefix}\nsummary: {request}");
+    assert_eq!(tools(request), tools(chat), "the summary request changed the tools declaration");
+    let value: Value = serde_json::from_str(request).unwrap();
+    let messages = value["messages"].as_array().unwrap();
+    let chat_messages: Value = serde_json::from_str(chat).unwrap();
+    // The final assistant answer of the last turn, then the instruction.
+    assert_eq!(messages.len(), chat_messages["messages"].as_array().unwrap().len() + 2);
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user", "{last}");
+    let instruction = last["content"][0]["text"].as_str().unwrap();
+    assert!(instruction.starts_with(CHAT_PREFIX_INSTRUCTION), "{instruction}");
+    assert!(instruction.contains("The messages above are a conversation to summarize."), "{instruction}");
+    let expected = format!("## Goal\nsummary {}", TURNS * 2);
+    assert!(summary.starts_with(&expected), "{summary}");
+    assert!(!summary.contains("**Turn Context (split turn):**"), "{summary}");
+}
+
+#[tokio::test]
+async fn without_reuse_chat_prefix_compaction_sends_the_standalone_ts_request() {
+    let (_server, results) = compacted_session(Some(false), |_| text_reply("## Goal\nstandalone")).await;
+    let bodies = &results[1..];
+    assert_eq!(bodies.len(), TURNS * 2 + 2, "{bodies:#?}");
+    for body in &bodies[TURNS * 2..] {
+        let value: Value = serde_json::from_str(body).unwrap();
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{body}");
+        assert!(messages[0]["content"].as_str().unwrap().starts_with("You are a context summarization assistant."));
+        assert!(!body.contains(CHAT_PREFIX_INSTRUCTION), "{body}");
+        assert!(tools(body).is_empty(), "{body}");
+    }
+}
+
+/// Unset, a local `openai-completions` server is the measured default; elsewhere off.
+#[tokio::test]
+async fn reuse_chat_prefix_defaults_on_for_loopback_openai_completions() {
+    let (_server, results) = compacted_session(None, |index| text_reply(&format!("## Goal\nsummary {index}"))).await;
+    let bodies = &results[1..];
+    assert_eq!(bodies.len(), TURNS * 2 + 1, "{bodies:#?}");
+    assert!(bodies[TURNS * 2].contains(CHAT_PREFIX_INSTRUCTION), "{}", bodies[TURNS * 2]);
+}
+
+#[tokio::test]
+async fn reuse_chat_prefix_falls_back_to_the_standalone_request_when_the_summary_calls_a_tool() {
+    let (_server, results) = compacted_session(Some(true), |index| {
+        if index == TURNS * 2 {
+            // The chat-prefix history summary answers with a tool call instead of text.
+            Response::sse(&sse_text(&[
+                chunk(json!({"role": "assistant", "content": null}), None),
+                chunk(
+                    json!({"tool_calls": [{"index": 0, "id": "call_x", "type": "function",
+                                           "function": {"name": "read", "arguments": "{\"path\":\"notes.txt\"}"}}]}),
+                    None,
+                ),
+                chunk(json!({}), Some("tool_calls")),
+            ]))
+        } else {
+            text_reply(&format!("## Goal\nsummary {index}"))
+        }
+    })
+    .await;
+    let (summary, bodies) = (&results[0], &results[1..]);
+    // The chat-prefix attempt, then TS Pi's history and turn prefix summaries.
+    assert_eq!(bodies.len(), TURNS * 2 + 3, "{bodies:#?}");
+    assert!(bodies[TURNS * 2].contains(CHAT_PREFIX_INSTRUCTION));
+    for body in &bodies[TURNS * 2 + 1..] {
+        assert!(!body.contains(CHAT_PREFIX_INSTRUCTION), "{body}");
+        assert!(body.contains("You are a context summarization assistant."), "{body}");
+    }
+    let fallback_index = TURNS * 2 + 1;
+    assert!(summary.starts_with(&format!("## Goal\nsummary {fallback_index}")), "{summary}");
+    assert!(summary.contains("**Turn Context (split turn):**"), "{summary}");
 }
 
 // ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@ use crate::core::compaction::branch_summarization::{
 };
 use crate::core::compaction::compaction::{
     CompactionPreparation, CompactionResult, CompactionSettings, calculate_context_tokens, compact,
-    estimate_context_tokens, estimate_projected_context_tokens, estimate_tokens,
-    prepare_compaction, should_compact,
+    compact_with_chat_prefix, estimate_context_tokens, estimate_projected_context_tokens,
+    estimate_tokens, prepare_compaction, prepare_compaction_chat_prefix, should_compact,
 };
 use crate::core::defaults::THINKING_LEVEL_OPTIONS;
 use crate::core::export_html::tool_renderer::{ToolHtmlRendererDeps, create_tool_html_renderer};
@@ -795,6 +795,19 @@ fn retry_policy(settings: &SettingsManager) -> RetryPolicy {
 
 fn compaction_settings_model(model: Option<&Model>) -> Option<SettingsManagerGetCompactionSettingsModel> {
     model.map(|m| SettingsManagerGetCompactionSettingsModel::new(m.provider.clone(), m.id.clone()))
+}
+
+/// Default of `compaction.reuseChatPrefix` when it is unset (pi-rs divergence LM-19).
+///
+/// On: `openai-completions` models on a loopback host, whose server keeps the chat's KV cache
+/// between requests. Measured against the standalone request, the summary request then prefills
+/// only the instruction (263–879 new tokens against 2.6K–11.2K) and summarization gets faster
+/// with equal summary quality. Off everywhere else: a cloud provider re-reads the whole chat at
+/// its own cache price, with no local KV reuse to gain.
+fn default_reuse_chat_prefix(model: &Model) -> bool {
+    model.api == pi_ai::types::known_api::OPENAI_COMPLETIONS
+        && reqwest::Url::parse(&model.base_url)
+            .is_ok_and(|url| pi_ai::utils::error_body::is_loopback_url(&url))
 }
 
 /// Error with an extension-facing message (TS `new Error(message)`).
@@ -4464,6 +4477,7 @@ impl AgentSession {
     async fn run_default_compaction(
         &self,
         preparation: &CompactionPreparation,
+        path_entries: &[SessionEntry],
         model: &Model,
         custom_instructions: Option<&str>,
         signal: CancellationToken,
@@ -4477,8 +4491,45 @@ impl AgentSession {
         let callbacks = self.summarization_retry_callbacks(SummarizationRetrySource::Compaction {
             reason,
         });
-        compact(
+        // Overflow recovery: the chat context no longer fits, so replaying it cannot work.
+        let chat_prefix = if reason != CompactionReason::Overflow
+            && self.reuse_chat_prefix_for_compaction(model, &request.model)
+        {
+            prepare_compaction_chat_prefix(path_entries)
+        } else {
+            None
+        };
+        let Some(chat_prefix) = chat_prefix else {
+            return compact(
+                preparation,
+                &request.model,
+                request.api_key.as_deref(),
+                request.headers.as_ref(),
+                custom_instructions,
+                Some(signal),
+                Some(request.thinking_level),
+                self.agent.stream_fn(),
+                request.env.as_ref(),
+                Some(&retry),
+                Some(&callbacks),
+                None,
+            )
+            .await;
+        };
+        // Convert the prefix as the agent converts its context, so the request matches the chat.
+        let settings_manager = self.settings_manager.clone();
+        let convert = move |messages: &[AgentMessage]| -> Vec<Message> {
+            let converted = convert_to_llm(messages);
+            if settings_manager.get_block_images() {
+                crate::core::sdk::block_images(converted)
+            } else {
+                converted
+            }
+        };
+        compact_with_chat_prefix(
             preparation,
+            &chat_prefix,
+            &convert,
             &request.model,
             request.api_key.as_deref(),
             request.headers.as_ref(),
@@ -4492,6 +4543,20 @@ impl AgentSession {
             None,
         )
         .await
+    }
+
+    /// Whether compaction summarizes with the chat prefix (`compaction.reuseChatPrefix`, LM-19).
+    /// Only when the summary goes to the chat's own model: another model has no cached chat state.
+    fn reuse_chat_prefix_for_compaction(&self, selected_model: &Model, request_model: &Model) -> bool {
+        let same_model = !is_virtual_model(selected_model)
+            && selected_model.provider == request_model.provider
+            && selected_model.id == request_model.id
+            && selected_model.base_url == request_model.base_url;
+        same_model
+            && self
+                .settings_manager
+                .get_compaction_reuse_chat_prefix()
+                .unwrap_or_else(|| default_reuse_chat_prefix(request_model))
     }
 
     fn clear_manual_compaction_state(&self) {
@@ -4563,6 +4628,7 @@ impl AgentSession {
                 None => {
                     self.run_default_compaction(
                         &preparation,
+                        &path_entries,
                         &model,
                         custom_instructions,
                         abort.clone(),
@@ -4960,8 +5026,15 @@ impl AgentSession {
             let computed = match extension_compaction {
                 Some(compaction) => compaction,
                 None => {
-                    self.run_default_compaction(&preparation, &model, None, token.clone(), reason)
-                        .await?
+                    self.run_default_compaction(
+                        &preparation,
+                        &path_entries,
+                        &model,
+                        None,
+                        token.clone(),
+                        reason,
+                    )
+                    .await?
                 }
             };
             if token.is_cancelled() {
@@ -7086,6 +7159,27 @@ mod tests {
         assert_eq!(no_message.user_message, None);
         assert!(parse_skill_block("plain text").is_none());
         assert!(parse_skill_block("<skill name=\"a\" location=\"b\">\nc\n</skill>trailing").is_none());
+    }
+
+    /// `compaction.reuseChatPrefix` is on for a local `openai-completions` server only.
+    #[test]
+    fn reuse_chat_prefix_defaults_to_loopback_openai_completions() {
+        let model = |api: &str, base_url: &str| -> Model {
+            serde_json::from_value(serde_json::json!({
+                "id": "m", "name": "m", "api": api, "provider": "p", "baseUrl": base_url,
+                "reasoning": false, "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 128000, "maxTokens": 8192,
+            }))
+            .unwrap()
+        };
+        for local in ["http://127.0.0.1:8084/v1", "http://localhost:8091/v1", "http://[::1]:9000/v1"] {
+            assert!(default_reuse_chat_prefix(&model("openai-completions", local)), "{local}");
+        }
+        assert!(!default_reuse_chat_prefix(&model("openai-completions", "https://api.example.com/v1")));
+        // Another API has no local cache in the chat's shape, even on a loopback host.
+        assert!(!default_reuse_chat_prefix(&model("openai-responses", "http://127.0.0.1:8084/v1")));
+        assert!(!default_reuse_chat_prefix(&model("openai-completions", "not a url")));
     }
 
     #[test]
