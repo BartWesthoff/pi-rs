@@ -1021,6 +1021,57 @@ async fn structured_output_terminates_with_a_rendered_result() {
     fx.cleanup();
 }
 
+const CUSTOM_RESULT_EXTENSION: &str = r#"
+import { Box, Text } from "@earendil-works/pi-tui";
+
+// Extensions compare `ui.custom()`'s resolved value against a frozen sentinel by identity (rpiv's
+// questionnaire does exactly this to restack itself over another overlay), so the host must hand
+// back the same object the factory passed to `done`, not a JSON copy of it.
+const YIELD = Object.freeze({ kind: "yield" });
+
+export default function (pi) {
+	pi.registerCommand("identity", {
+		description: "Resolve custom() with a sentinel object",
+		handler: async (_args, ctx) => {
+			const result = await ctx.ui.custom((_tui, _theme, _kb, done) => {
+				const box = new Box(1, 0);
+				box.addChild(new Text("waiting", 0, 0));
+				setTimeout(() => done(YIELD), 50);
+				return box;
+			});
+			ctx.ui.notify(`identical ${result === YIELD} kind ${result?.kind}`);
+		},
+	});
+	pi.registerCommand("string-result", {
+		description: "Resolve custom() with a string",
+		handler: async (_args, ctx) => {
+			const result = await ctx.ui.custom((_tui, _theme, _kb, done) => {
+				const box = new Box(1, 0);
+				box.addChild(new Text("waiting", 0, 0));
+				setTimeout(() => done("picked gamma"), 50);
+				return box;
+			});
+			ctx.ui.notify(`got ${result}`);
+		},
+	});
+}
+"#;
+
+/// `ui.custom()` settles with the value the factory passed to `done`, unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn custom_ui_resolves_with_the_original_value() {
+    let _lock = LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("custom-result.ts");
+    std::fs::write(&path, CUSTOM_RESULT_EXTENSION).unwrap();
+    let fx = Fixture::new(dir.path(), &[path.to_str().unwrap()]).await;
+    fx.submit("/identity");
+    fx.wait_text("identical true kind yield").await;
+    fx.submit("/string-result");
+    fx.wait_text("got picked gamma").await;
+    fx.cleanup();
+}
+
 const MOUSE_EXTENSION: &str = r#"
 import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { Box, SelectList, Text } from "@earendil-works/pi-tui";

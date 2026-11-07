@@ -379,6 +379,13 @@ export class TuiProxy {
 	hasOverlay() {
 		return !!call("tui", { id: this.__tuiId, m: "hasOverlay", a: [] });
 	}
+	/** TS `getTopmostVisibleOverlay()`: the frontmost visible capturing overlay entry, if any. */
+	getTopmostVisibleOverlay() {
+		const entry = call("tui", { id: this.__tuiId, m: "getTopmostVisibleOverlay", a: [] });
+		if (!entry) return undefined;
+		const component = entry.component.js ?? rustComponent(entry.component.rid);
+		return { component, hidden: false, focusOrder: entry.focusOrder };
+	}
 	start() {
 		call("tui", { id: this.__tuiId, m: "start", a: [] });
 	}
@@ -737,13 +744,28 @@ function makeUi(ctx) {
 		setTitle: (title) => void ui("setTitle", String(title)),
 		custom: async (factory, options) => {
 			const overlayOptions = options?.overlayOptions;
-			return u(
-				await uiAsync("custom", factory, {
+			// TS resolves `custom()` with the very value passed to `done` (first call wins); Rust only
+			// carries a JSON copy, which loses identity (sentinels compared with `===`), prototypes and
+			// functions. Keep the original here and return it.
+			let settled;
+			const wrapped =
+				typeof factory === "function"
+					? function (tui, theme, keybindings, done) {
+							const settle = (value) => {
+								settled ??= { value };
+								return done(value);
+							};
+							return factory.call(this, tui, theme, keybindings, settle);
+						}
+					: factory;
+			const result = u(
+				await uiAsync("custom", wrapped, {
 					overlay: options?.overlay,
 					overlayOptions: overlayOptions ?? null,
 					onHandle: options?.onHandle ?? null,
 				}),
 			);
+			return settled ? settled.value : result;
 		},
 		pasteToEditor: (text) => void ui("pasteToEditor", String(text)),
 		setEditorText: (text) => void ui("setEditorText", String(text)),
