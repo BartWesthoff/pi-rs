@@ -123,10 +123,11 @@ pub(crate) fn config_object(ctx: &mut Context) -> JsResult<JsValue> {
 fn op_exit(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let code = args.get_or_undefined(0).to_number(ctx).unwrap_or(0.0) as i32;
     let st = state(ctx);
-    if let Some(h) = &st.shared.options.on_exit {
-        h(code);
-    }
-    Ok(JsValue::undefined())
+    let Some(h) = &st.shared.options.on_exit else {
+        return Ok(JsValue::undefined());
+    };
+    // `true`: the host handles the exit (pi's graceful shutdown), so `process.exit()` returns.
+    Ok(JsValue::from(h(code)))
 }
 
 fn op_kill(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {

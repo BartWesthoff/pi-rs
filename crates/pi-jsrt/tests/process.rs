@@ -315,3 +315,152 @@ async fn process_env_tz_sets_the_runtime_timezone() {
         .unwrap();
     assert_eq!(value, serde_json::json!([[0, 0], [5, -330], 240, [0, 0], "string", ""]));
 }
+
+/// `process.execPath` is pi's own binary, which is also a Node: `spawn`/`execFileSync` with it
+/// and a script, or with a Node CLI flag first, re-enter Node mode instead of starting the pi
+/// agent. Anything else (`--help`, a non-script argument) still runs the pi CLI.
+#[test]
+fn exec_path_as_node_rewrites_scripts_and_node_cli_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = write(
+        dir.path(),
+        "driver.js",
+        r#"const { execFileSync, spawnSync } = require("node:child_process");
+const out = {};
+out.node = process.execPath;
+out.p = execFileSync(process.execPath, ["-p", "process.execPath"], { encoding: "utf8" }).trim();
+out.version = execFileSync(process.execPath, ["--version"], { encoding: "utf8" }).trim();
+out.eval = execFileSync(process.execPath, ["-e", "process.stdout.write('ev')"], { encoding: "utf8" });
+const bad = spawnSync(process.execPath, ["--check", "bad.js"], { encoding: "utf8" });
+out.badStatus = bad.status;
+out.badStderr = /SyntaxError/.test(bad.stderr);
+out.okStatus = spawnSync(process.execPath, ["--check", "ok.js"], { encoding: "utf8" }).status;
+out.script = execFileSync(process.execPath, ["child.js"], { encoding: "utf8" }).trim();
+console.log(JSON.stringify(out));
+"#,
+    );
+    write(dir.path(), "ok.js", "const a = 1;\n");
+    write(dir.path(), "bad.js", "const a = (;\n");
+    write(dir.path(), "child.js", "import('node:fs').then(() => process.stdout.write('script\\n'));\n");
+    let (stdout, stderr, code) = run_node_mode(dir.path(), &[&driver]);
+    assert_eq!(code, 0, "{stderr}");
+    let out: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(out["p"], out["node"], "`-p process.execPath` prints the pi path");
+    assert_eq!(out["version"], "v22.19.0");
+    assert_eq!(out["eval"], "ev");
+    assert_eq!(out["okStatus"], 0);
+    assert_eq!(out["badStatus"], 1);
+    assert_eq!(out["badStderr"], true);
+    assert_eq!(out["script"], "script");
+}
+
+/// Arguments that are neither a Node CLI flag nor a script path are left alone: `--help` is
+/// not rewritten into Node mode (the pi CLI keeps it; `pi-jsrt-node`, whose `execPath` is not
+/// the pi binary, prints nothing for it).
+#[test]
+fn exec_path_without_node_args_is_not_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = write(
+        dir.path(),
+        "driver.js",
+        r#"const { spawnSync } = require("node:child_process");
+const help = spawnSync(process.execPath, ["--help"], { encoding: "utf8" });
+const plain = spawnSync(process.execPath, ["not-a-script"], { encoding: "utf8" });
+console.log(JSON.stringify({ help: help.status, helpNode: /__pi_jsrt_node__/.test(help.stdout ?? ""), plain: plain.status }));
+"#,
+    );
+    let (stdout, stderr, code) = run_node_mode(dir.path(), &[&driver]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), r#"{"help":0,"helpNode":false,"plain":1}"#);
+}
+
+/// `detached:true` is Node's: the child leads a new session (`getsid(pid) == pid`), so it
+/// survives the parent's exit.
+#[test]
+fn detached_child_leads_its_own_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = write(
+        dir.path(),
+        "child.js",
+        r#"require("node:fs").writeFileSync(process.argv[2], String(process.pid));
+setTimeout(() => {}, 60000);
+"#,
+    );
+    let driver = write(
+        dir.path(),
+        "driver.js",
+        r#"const { spawn } = require("node:child_process");
+const d = spawn(process.execPath, [process.argv[2], process.argv[3]], { detached: true, stdio: "ignore" });
+d.unref();
+"#,
+    );
+    let pid_file = dir.path().join("pid");
+    let (_, stderr, code) = run_node_mode(dir.path(), &[&driver, &child, &pid_file.display().to_string()]);
+    assert_eq!(code, 0, "{stderr}");
+    // The detached child outlives the parent, so it may still be starting when the parent exits.
+    let started = std::time::Instant::now();
+    let pid: i32 = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_file) {
+            break text.trim().parse().unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "detached child never wrote its pid");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // SAFETY: getsid is a plain syscall on a pid the test just created.
+    let sid = unsafe { libc::getsid(pid) };
+    // SAFETY: kill on a live child the test started; SIGKILL because the child just sleeps.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(sid, pid, "the detached child is its own session leader");
+}
+
+/// Differential: the same `--check` / `-p` / `--version` / `-e` invocations as real Node. Exit
+/// codes must match; stdout matches exactly for `-p`/`-e`, and for `--version` in shape (the
+/// version number itself differs: pi-rs reports pi's `engines` minimum, `v22.19.0`).
+#[test]
+fn node_cli_flags_match_real_node() {
+    let Some(node) = real_node() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "ok.js", "const a = 1;\n");
+    write(dir.path(), "bad.js", "const a = (;\n");
+    let cases: &[&[&str]] = &[
+        &["--check", "ok.js"],
+        &["--check", "bad.js"],
+        &["-c", "ok.js"],
+        &["-p", "1+1"],
+        &["--print", "'x' + 'y'"],
+        &["-e", "process.stdout.write('e')"],
+        &["--check", "missing.js"],
+    ];
+    for args in cases {
+        let real = Command::new(&node).args(*args).current_dir(dir.path()).output().unwrap();
+        let (ours_out, ours_err, ours_code) = run_node_mode(dir.path(), args);
+        let real_code = real.status.code().unwrap_or(-1);
+        assert_eq!(ours_code, real_code, "{args:?}: exit code");
+        if !args.contains(&"bad.js") && !args.contains(&"missing.js") {
+            assert_eq!(ours_out, String::from_utf8_lossy(&real.stdout), "{args:?}: stdout");
+        }
+        // The error shape: Node prints `SyntaxError` (or MODULE_NOT_FOUND) before its version line.
+        if args.contains(&"bad.js") {
+            assert!(ours_err.contains("SyntaxError"), "{args:?}: {ours_err}");
+            assert!(String::from_utf8_lossy(&real.stderr).contains("SyntaxError"));
+        }
+    }
+    // `--version` prints the Node version on both, and pi-rs reports the engines minimum.
+    let (version, _, code) = run_node_mode(dir.path(), &["--version"]);
+    assert_eq!(code, 0);
+    assert_eq!(version.trim(), "v22.19.0");
+    let real_version = Command::new(&node).arg("--version").output().unwrap();
+    assert!(String::from_utf8_lossy(&real_version.stdout).starts_with('v'));
+}
+
+/// `--import` preloads the module before the main one, `--experimental-strip-types` is accepted
+/// (TypeScript is always stripped), and `--input-type=module` evaluates `-e` as an ES module.
+#[test]
+fn node_mode_accepts_import_strip_types_and_input_type() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "pre.mjs", "globalThis.preloaded = 'yes';\n");
+    let main = write(dir.path(), "main.mjs", "console.log(String(globalThis.preloaded));\n");
+    assert_eq!(run_node_mode(dir.path(), &["--import", "./pre.mjs", &main]).0, "yes\n");
+    assert_eq!(run_node_mode(dir.path(), &["--experimental-strip-types", "-p", "1+1"]).0, "2\n");
+    assert_eq!(run_node_mode(dir.path(), &["--input-type=module", "-e", "console.log('mod')"]).0, "mod\n");
+}

@@ -55,6 +55,35 @@ function resolveCwd(cwd) {
   return internal.requireBuiltin("path").resolve(String(cwd));
 }
 
+const NODE_SCRIPT_RE = /\.(js|mjs|cjs|ts|mts|cts)$/;
+// Node CLI flags pi-rs implements in Node mode (src/node.rs).
+const NODE_CLI_FLAGS = new Set([
+  "--check",
+  "-c",
+  "-p",
+  "--print",
+  "-e",
+  "--eval",
+  "--version",
+  "-v",
+  "--import",
+  "--experimental-strip-types",
+  "--input-type",
+]);
+
+// `process.execPath` is pi's binary, which is also a Node (see src/node.rs). Running it as Node
+// (a script, or a Node CLI flag) re-enters Node mode instead of starting the pi agent; anything
+// else (`--help`, a non-script argument) stays the pi CLI, like an unchanged Node package expects.
+function nodeArgsForExecPath(file, args) {
+  if (file !== process.execPath || args.length === 0) return null;
+  const prefix = ops.config.nodeExec.slice(1);
+  const first = args[0];
+  if (!first.startsWith("-")) return NODE_SCRIPT_RE.test(first) ? [...prefix, ...args] : null;
+  const eq = first.indexOf("=");
+  const flag = eq === -1 ? first : first.slice(0, eq);
+  return NODE_CLI_FLAGS.has(flag) ? [...prefix, ...args] : null;
+}
+
 function normalizeSpawnArgs(command, args, options) {
   if (!Array.isArray(args)) {
     options = args ?? {};
@@ -63,6 +92,8 @@ function normalizeSpawnArgs(command, args, options) {
   options = { ...(options ?? {}) };
   let file = String(command);
   let argv = args.map(String);
+  const nodeArgs = options.shell ? null : nodeArgsForExecPath(file, argv);
+  if (nodeArgs) argv = nodeArgs;
   if (options.shell) {
     const cmd = [file, ...argv].join(" ");
     file = typeof options.shell === "string" ? options.shell : "/bin/sh";

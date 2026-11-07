@@ -148,7 +148,19 @@ fn apply_common(cmd: &mut std::process::Command, o: &SpawnOpts) {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
     if o.detached {
-        cmd.process_group(0);
+        // Node's `detached:true`: the child leads a new session and process group (setsid), so it
+        // has no controlling terminal and outlives the parent's group signals. Not
+        // `process_group(0)`: that makes the child a process-group leader, and setsid then fails
+        // with EPERM.
+        // SAFETY: setsid is async-signal-safe and takes no arguments.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     if let Some(a0) = &o.argv0 {
         cmd.arg0(a0);

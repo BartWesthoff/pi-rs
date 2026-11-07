@@ -27,6 +27,28 @@ type ExitHook = std::sync::Arc<dyn Fn(i32) + Send + Sync>;
 
 static EXIT_HOOK: parking_lot::RwLock<Option<ExitHook>> = parking_lot::RwLock::new(None);
 
+type GracefulExit = std::sync::Arc<dyn Fn(i32) -> bool + Send + Sync>;
+
+/// Owner of the terminal (interactive mode) that can turn `process.exit()` from extension
+/// JavaScript into its graceful shutdown. `false` means the process is no longer running.
+static GRACEFUL_EXIT: parking_lot::RwLock<Option<GracefulExit>> = parking_lot::RwLock::new(None);
+
+/// Register (or with `None`, unregister) the graceful shutdown [`request_graceful_exit`] asks for.
+pub fn set_graceful_exit(hook: Option<GracefulExit>) {
+    *GRACEFUL_EXIT.write() = hook;
+}
+
+/// `process.exit(code)` from extension JavaScript: hand the code to the registered owner so it
+/// restores the terminal and emits `session_shutdown` first. Without an owner (print and other
+/// headless modes) the process exits here. Always reports that the host owns the exit, so
+/// JavaScript does not unwind with `ERR_PROCESS_EXIT`.
+pub fn request_graceful_exit(code: i32) -> bool {
+    match GRACEFUL_EXIT.read().clone() {
+        Some(hook) => hook(code),
+        None => crate::utils::process_exit::exit(code),
+    }
+}
+
 /// Test hook: called by [`exit`] before the process exits. A hook that panics (unwinds) keeps
 /// the process alive, so tests can drive code paths that end in `process.exit()`.
 pub fn set_exit_hook(hook: Option<ExitHook>) {

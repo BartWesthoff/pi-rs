@@ -318,7 +318,9 @@ Object.assign(process, {
     try {
       process.emit("exit", c);
     } catch {}
-    ops.exit(c);
+    // A host that owns the process (pi's interactive shutdown) exits on its own: return instead
+    // of unwinding with ERR_PROCESS_EXIT.
+    if (ops.exit(c)) return;
     const err = new Error(`process.exit(${c}) called`);
     err.code = "ERR_PROCESS_EXIT";
     err.exitCode = c;

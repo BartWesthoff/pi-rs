@@ -317,7 +317,10 @@ async fn process_object() {
         env: Some(env),
         argv: vec!["pi".into(), "ext.ts".into()],
         stdout: Some(Arc::new(move |b: &[u8]| o.lock().push_str(&String::from_utf8_lossy(b)))),
-        on_exit: Some(Arc::new(move |c| ex.lock().push(c))),
+        on_exit: Some(Arc::new(move |c| {
+            ex.lock().push(c);
+            false
+        })),
         ..Default::default()
     })
     .unwrap();

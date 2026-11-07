@@ -23,6 +23,10 @@ use crate::runtime::{JsRuntime, RuntimeOptions};
 /// First argument that makes [`main_if_requested`] run the process in Node mode.
 pub const NODE_MARKER: &str = "__pi_jsrt_node__";
 
+/// `process.version`: the Node release pi-rs reports (pi's `engines` minimum). Mirrors the
+/// literal in `js/node/process.js`.
+pub const NODE_VERSION: &str = "v22.19.0";
+
 /// Environment variables Node consumes at startup (and removes from `process.env`).
 const STARTUP_ENV: &[&str] = &["NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE_UNIQUE_ID"];
 
@@ -41,16 +45,43 @@ struct Parsed {
     exec_argv: Vec<String>,
     eval: Option<String>,
     print: bool,
+    check: bool,
+    version: bool,
     script: Option<String>,
     args: Vec<String>,
 }
 
 fn parse(args: Vec<String>) -> Parsed {
-    let mut p = Parsed { exec_argv: Vec::new(), eval: None, print: false, script: None, args: Vec::new() };
+    let mut p = Parsed {
+        exec_argv: Vec::new(),
+        eval: None,
+        print: false,
+        check: false,
+        version: false,
+        script: None,
+        args: Vec::new(),
+    };
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
+            // `--check`/`-c` only parses the script (syntax check); pi-rs strips types anyway.
+            "--check" | "-c" => {
+                p.check = true;
+                p.exec_argv.push(a.to_string());
+                i += 1;
+            }
+            // `--version`/`-v` prints `process.version` without running anything.
+            "--version" | "-v" => {
+                p.version = true;
+                p.exec_argv.push(a.to_string());
+                i += 1;
+            }
+            // TypeScript is always stripped (see `transpile`), so this flag is accepted and ignored.
+            "--experimental-strip-types" | "--no-experimental-strip-types" => {
+                p.exec_argv.push(a.to_string());
+                i += 1;
+            }
             "-e" | "--eval" | "-p" | "--print" => {
                 p.print |= a == "-p" || a == "--print";
                 p.exec_argv.push(a.to_string());
@@ -79,7 +110,7 @@ fn parse(args: Vec<String>) -> Parsed {
         }
     }
     let mut rest = args.into_iter().skip(i);
-    if p.eval.is_none() {
+    if p.eval.is_none() && !p.version {
         p.script = rest.next();
     }
     p.args = rest.collect();
@@ -104,6 +135,13 @@ where
 {
     reset_signals();
     let parsed = parse(args);
+    if parsed.version {
+        println!("{NODE_VERSION}");
+        return 0;
+    }
+    if parsed.check {
+        return check(&parsed);
+    }
     let tokio = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("pi-jsrt-io").enable_all().build() {
         Ok(t) => t,
         Err(e) => {
@@ -152,13 +190,7 @@ where
         stdin: true,
         expose_gc: parsed.exec_argv.iter().any(|a| a == "--expose-gc" || a == "--expose_gc"),
         tokio: Some(tokio.handle().clone()),
-        on_exit: Some(Arc::new(|code| {
-            use std::io::Write;
-            crate::ops::process::reset_tty_mode();
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stderr().flush();
-            std::process::exit(code);
-        })),
+        on_exit: Some(Arc::new(exit_handler)),
         ..Default::default()
     };
     configure(&mut options);
@@ -215,6 +247,49 @@ where
         crate::ops::process::reset_tty_mode();
         code
     })
+}
+
+/// `process.exit(code)` for an embedder: restore the terminal, flush the standard streams and
+/// exit. Node runs the JS `exit` listeners and libc `atexit` handlers (pi-tui's terminal
+/// restore) before dying, which this preserves.
+pub fn exit(code: i32) -> ! {
+    use std::io::Write;
+    crate::ops::process::reset_tty_mode();
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code)
+}
+
+/// [`RuntimeOptions::on_exit`] for a process that exits directly (`node`-like modes): `false`
+/// tells JavaScript the exit happened here.
+fn exit_handler(code: i32) -> bool {
+    exit(code)
+}
+
+/// `node --check <file> [args]`: parse the script (TypeScript is stripped first) and report
+/// syntax errors like Node, without running it. Exit 0 when it parses, 1 otherwise.
+fn check(parsed: &Parsed) -> i32 {
+    let Some(script) = &parsed.script else {
+        // `node --check` with no script reads stdin in Node; pi-rs only checks files.
+        return 0;
+    };
+    let path = std::path::Path::new(script);
+    let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().unwrap_or_else(|_| "/".into()).join(path) };
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(_) => {
+            eprintln!("Error: Cannot find module '{script}'\n  code: 'MODULE_NOT_FOUND'\n\nNode.js {NODE_VERSION}");
+            return 1;
+        }
+    };
+    let lang = crate::transpile::SourceLang::from_path(&path);
+    match crate::transpile::transpile(&source, &path, lang) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("{}\n\nNode.js {NODE_VERSION}", e);
+            1
+        }
+    }
 }
 
 /// Like Node's `PlatformInit`: start from default signal dispositions (SIGPIPE and SIGXFSZ

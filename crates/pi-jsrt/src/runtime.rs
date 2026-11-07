@@ -22,8 +22,10 @@ use crate::error::{self, Error, Result};
 pub type OutputSink = Arc<dyn Fn(&[u8]) + Send + Sync>;
 /// Callback for uncaught exceptions and unhandled rejections: `(kind, error)`.
 pub type UncaughtHandler = Arc<dyn Fn(&str, &Error) + Send + Sync>;
-/// Callback for `process.exit(code)`.
-pub type ExitHandler = Arc<dyn Fn(i32) + Send + Sync>;
+/// Callback for `process.exit(code)`. Returning `true` means the embedder took over the exit
+/// (it shuts down on its own); `process.exit()` then returns instead of throwing
+/// `ERR_PROCESS_EXIT`. Returning `false` ends the process, as Node does.
+pub type ExitHandler = Arc<dyn Fn(i32) -> bool + Send + Sync>;
 
 /// A module provided by the embedder under a bare specifier.
 #[derive(Debug, Clone)]

@@ -367,6 +367,8 @@ fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
             if let Some(rt) = &c.rt {
                 rt.shutdown();
             }
+            // The worker runtime is being torn down; `process.exit()` still unwinds it.
+            false
         })),
         virtual_modules,
         aliases: parent.aliases.read().clone(),

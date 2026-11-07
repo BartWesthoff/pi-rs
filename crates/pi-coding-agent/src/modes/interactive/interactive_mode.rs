@@ -532,6 +532,8 @@ pub(crate) struct State {
     pub(crate) retry_escape_handler: Option<Option<Handler>>,
     pub(crate) compaction_queued_messages: Vec<CompactionQueuedMessage>,
     pub(crate) shutdown_requested: bool,
+    /// Exit code the shutdown requested from extension JavaScript (`process.exit(code)`).
+    pub(crate) requested_exit_code: i32,
     pub(crate) is_shutting_down: bool,
     pub(crate) bug_report_hint_shown: bool,
     pub(crate) install_change_warning_shown: bool,
@@ -819,6 +821,7 @@ impl Inner {
                 retry_escape_handler: None,
                 compaction_queued_messages: Vec::new(),
                 shutdown_requested: false,
+                requested_exit_code: 0,
                 is_shutting_down: false,
                 bug_report_hint_shown: false,
                 install_change_warning_shown: false,
@@ -981,6 +984,25 @@ impl Inner {
         }
 
         self.register_signal_handlers();
+        // `process.exit()` in an extension becomes a graceful shutdown here: the terminal is
+        // restored and `session_shutdown{reason:"quit"}` runs before the process exits.
+        let weak = self.weak.clone();
+        crate::utils::process_exit::set_graceful_exit(Some(Arc::new(move |code| {
+            let Some(this) = weak.upgrade() else { return false };
+            if this.state.lock().is_shutting_down {
+                return true;
+            }
+            {
+                let mut state = this.state.lock();
+                state.shutdown_requested = true;
+                state.requested_exit_code = code;
+            }
+            if this.session().is_idle() {
+                let target = this.clone();
+                this.spawn(async move { target.shutdown(false).await });
+            }
+            true
+        })));
 
         // Load changelog (only show new entries, skip for resumed sessions)
         let changelog = self.get_changelog_for_display();
@@ -2132,6 +2154,8 @@ impl Inner {
             crate::utils::process_exit::exit(0);
         }
 
+        // An extension's `process.exit(code)` exits with that code; every other shutdown exits 0.
+        let code = self.state.lock().requested_exit_code;
         self.theme_controller.disable_auto_sync();
         self.ui().terminal().drain_input(std::time::Duration::from_millis(1000), std::time::Duration::from_millis(50));
         self.stop(None);
@@ -2143,7 +2167,7 @@ impl Inner {
             let _ = writeln!(stdout, "{} {resume}", crate::utils::chalk::dim("To resume this session:"));
             let _ = stdout.flush();
         }
-        crate::utils::process_exit::exit(0);
+        crate::utils::process_exit::exit(code);
     }
 
     pub(crate) async fn check_shutdown_requested(self: Arc<Self>) {
@@ -2878,6 +2902,7 @@ impl Inner {
             self.stop_interactive_tui(fullscreen_exit_output);
         }
         self.unregister_signal_handlers();
+        crate::utils::process_exit::set_graceful_exit(None);
     }
 }
 

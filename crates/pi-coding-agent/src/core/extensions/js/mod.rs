@@ -487,6 +487,9 @@ impl JsExtensionHost {
             aliases,
             thread_name: "pi-extensions".to_string(),
             tokio: Some(extension_io_runtime()?),
+            // `process.exit()` in an extension exits pi: the owner of the terminal (interactive
+            // mode) restores it and emits `session_shutdown` first; headless modes exit here.
+            on_exit: Some(std::sync::Arc::new(crate::utils::process_exit::request_graceful_exit)),
             ..Default::default()
         };
         let rt = JsRuntime::new(options).map_err(js_error)?;
