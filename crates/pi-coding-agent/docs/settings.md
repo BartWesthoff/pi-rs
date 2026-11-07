@@ -74,6 +74,7 @@ CLI tool options override this setting for one invocation. `--tools` with only `
 | `compaction.reserveTokens` | number | `16384` | Free context tokens below which automatic compaction starts. |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens retained without summarization. |
 | `compaction.modelOverrides` | object | None | Per-model token settings keyed by exact `provider/modelId`. |
+| `compaction.reuseChatPrefix` | boolean | Local `openai-completions` servers: `true`; elsewhere: `false` | Send the chat itself as the summary request's prefix so a local server reuses its KV cache (pi-rs divergence LM-19). See [Compaction Reference](compaction.md#chat-prefix-summary-requests). |
 
 <a id="per-model-compaction-overrides"></a>
 

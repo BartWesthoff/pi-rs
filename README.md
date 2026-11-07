@@ -152,6 +152,14 @@ Behavior that still differs from TypeScript pi, and why:
     stored OAuth credentials, the credential is refreshed once (through the usual locked refresh,
     which skips it when another process already rotated the token) and the request is repeated
     once. A second 401, or a failed refresh, ends with the `/login` message.
+- **Compaction summary requests on a local server.** With `compaction.reuseChatPrefix` (default
+  on for `openai-completions` models whose base URL is a loopback host, off elsewhere), the
+  summary request replays the chat's messages as the request prefix and appends one instruction
+  message, so a local server keeps its KV cache; TypeScript sends a standalone system prompt with
+  the conversation serialized into a user message. When the replay is unusable (the model answers
+  with a tool call, the request fails, or compaction is recovering from context overflow) pi-rs
+  falls back to TypeScript's standalone requests. The setting defaults off for every other
+  provider and model, where the requests are byte-identical to TypeScript's.
 - **Unverified.** The Bedrock error text when a stream is aborted mid-response (HTTP/2 close) has
   not been compared with the AWS SDK.
 
