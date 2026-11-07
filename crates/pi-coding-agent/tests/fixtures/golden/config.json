@@ -112,7 +112,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -1345,7 +1345,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -1623,7 +1623,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -1864,7 +1864,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -2097,7 +2097,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -2361,7 +2361,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -2599,7 +2599,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -2816,7 +2816,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -3040,7 +3040,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -3263,7 +3263,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -3481,7 +3481,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -3772,7 +3772,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -4268,7 +4268,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -4498,7 +4498,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -4720,7 +4720,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -4942,7 +4942,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -5446,7 +5446,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -5740,7 +5740,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -5988,7 +5988,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -6220,7 +6220,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -6511,7 +6511,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -6753,7 +6753,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -6995,7 +6995,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -7228,7 +7228,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -7480,7 +7480,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false
@@ -7716,7 +7716,7 @@
       "ok": false
      },
      "getEnableInstallTelemetry": {
-      "ok": true
+      "ok": false
      },
      "getEnableAnalytics": {
       "ok": false

@@ -301,6 +301,11 @@ impl Inner {
                 self.show_models_selector();
                 return;
             }
+            "/refresh-models" => {
+                clear(&editor);
+                self.clone().handle_refresh_models_command().await;
+                return;
+            }
             "/share" => {
                 self.clone().handle_share_command().await;
                 clear(&editor);

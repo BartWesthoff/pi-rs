@@ -37,7 +37,8 @@ pub const SHOW_CACHE_MISS_NOTICES: bool = false;
 pub const QUIET_STARTUP: bool = false;
 pub const DEFAULT_PROJECT_TRUST: &str = "ask";
 pub const COLLAPSE_CHANGELOG: bool = false;
-pub const ENABLE_INSTALL_TELEMETRY: bool = true;
+// pi-rs divergence from TS Pi: install telemetry is opt-in, so a default start makes no pi.dev request.
+pub const ENABLE_INSTALL_TELEMETRY: bool = false;
 pub const ENABLE_ANALYTICS: bool = false;
 pub const ENABLE_SKILL_COMMANDS: bool = true;
 

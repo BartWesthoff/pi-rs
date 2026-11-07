@@ -4,7 +4,6 @@ use crate::core::model_runtime::ModelRuntime;
 use crate::core::tools::js_util::locale_compare;
 use crate::modes::interactive::components::dynamic_border::DynamicBorder;
 use crate::modes::interactive::components::keybinding_hints::{key_display_text, key_hint};
-use crate::modes::interactive::model_catalog_refresh::refresh_model_catalogs;
 use crate::modes::interactive::model_search::{ModelSearchItem, get_model_selector_search_text};
 use crate::modes::interactive::theme::theme::{ThemeColor, theme};
 use parking_lot::Mutex;
@@ -316,7 +315,17 @@ impl Inner {
                 controller.cancel();
             })
         };
-        let result = refresh_model_catalogs(&self.model_runtime, self.refresh_abort_controller.clone()).await;
+        // pi-rs divergence from TS Pi: opening `/model` reloads the local catalog only, so nothing is
+        // fetched from pi.dev. `/refresh-models` (and /scoped-models, /login, `pi update --models`)
+        // refreshes the catalogs over the network on demand.
+        let result = self
+            .model_runtime
+            .refresh(Some(pi_ai::models::ModelsRefreshOptions {
+                allow_network: Some(false),
+                signal: Some(self.refresh_abort_controller.clone()),
+                ..Default::default()
+            }))
+            .await;
         timer.abort();
         if self.closed.load(Ordering::SeqCst) {
             return;

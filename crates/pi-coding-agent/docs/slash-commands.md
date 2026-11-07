@@ -12,6 +12,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | `/model [provider/model]` | Select a model |
 | `/thinking [level]` | Set the thinking level |
 | `/scoped-models` | Configure the models used by interactive cycling |
+| `/refresh-models` | Refresh the provider model catalogs now (this build never fetches them at startup) |
 | `/login [provider]` | Add provider authentication |
 | `/logout` | Remove provider authentication |
 | `/llama` | Manage models on the configured llama.cpp router |

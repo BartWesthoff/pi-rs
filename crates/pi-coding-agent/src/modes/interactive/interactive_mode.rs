@@ -655,10 +655,6 @@ impl InteractiveMode {
         self.inner.show_new_version_notification(release);
     }
 
-    pub fn show_package_update_notification(&self, packages: &[String]) {
-        self.inner.show_package_update_notification(packages);
-    }
-
     pub fn stop(&self, fullscreen_exit_output: Option<FullscreenExitOutput>) {
         self.inner.stop(fullscreen_exit_output);
     }
@@ -1289,25 +1285,8 @@ impl Inner {
     async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         self.clone().init().await?;
 
-        if std::env::var_os("PI_OFFLINE").is_none_or(|v| v.is_empty()) {
-            let this = self.clone();
-            self.spawn(async move {
-                let signal = tokio_util::sync::CancellationToken::new();
-                let timeout_signal = signal.clone();
-                let timer = crate::utils::uncaught::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                    timeout_signal.cancel();
-                });
-                let runtime = this.session().model_runtime();
-                if crate::modes::interactive::model_catalog_refresh::refresh_model_catalogs(&runtime, signal)
-                    .await
-                    .is_ok()
-                {
-                    this.update_available_provider_count();
-                }
-                timer.abort();
-            });
-        }
+        // pi-rs divergence from TS Pi: no model catalog fetch and no package update check at startup. The embedded
+        // catalog is the default; `/refresh-models` and `pi update --models` refresh it on demand.
 
         // Start version check asynchronously
         {
@@ -1316,22 +1295,6 @@ impl Inner {
             self.spawn(async move {
                 if let Ok(Some(release)) = crate::utils::version_check::check_for_new_pi_version(&version).await {
                     this.show_new_version_notification(&release);
-                }
-            });
-        }
-
-        // Start package update check asynchronously
-        {
-            let this = self.clone();
-            self.spawn(async move {
-                let updates = this.check_for_package_updates().await;
-                if !updates.is_empty() {
-                    this.show_package_update_notification(&updates);
-                }
-                // On Windows, npm can overwrite the shared console title while checking extension
-                // package versions. Restore Pi's title after the startup check.
-                if cfg!(windows) && this.state.lock().is_initialized {
-                    this.update_terminal_title();
                 }
             });
         }
@@ -1400,24 +1363,6 @@ impl Inner {
             if let Err(error) = self.session().prompt(&user_input, None).await {
                 self.show_error(&err_message(&error));
             }
-        }
-    }
-
-    async fn check_for_package_updates(&self) -> Vec<String> {
-        if std::env::var_os("PI_OFFLINE").is_some_and(|v| !v.is_empty()) {
-            return Vec::new();
-        }
-        let package_manager = crate::core::package_manager::DefaultPackageManager::new(
-            &crate::core::package_manager::PackageManagerOptions {
-                cwd: self.session_manager().get_cwd(),
-                agent_dir: get_agent_dir(),
-                settings_manager: self.settings_manager(),
-                builtin_extensions: None,
-            },
-        );
-        match package_manager.check_for_available_updates().await {
-            Ok(updates) => updates.into_iter().map(|u| u.display_name).collect(),
-            Err(_) => Vec::new(),
         }
     }
 
@@ -2585,31 +2530,6 @@ impl Inner {
             self.add_spacer();
         }
         self.add_text(&self.chat_container, Arc::new(changelog_line), 1, 0);
-        self.chat_container.add_child(Arc::new(DynamicBorder::new(Some(warning_border))));
-        self.request_render();
-    }
-
-    pub(crate) fn show_package_update_notification(&self, packages: &[String]) {
-        use crate::modes::interactive::components::dynamic_border::DynamicBorder;
-        let package_lines = packages.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
-        let warning_border: Arc<dyn Fn(String) -> String + Send + Sync> =
-            Arc::new(|text: String| theme().fg(&ThemeColor::Warning, &text));
-        self.add_spacer();
-        self.chat_container.add_child(Arc::new(DynamicBorder::new(Some(warning_border.clone()))));
-        self.add_text(
-            &self.chat_container,
-            Arc::new(move || {
-                format!(
-                    "{}\n{}{}\n{}\n{package_lines}",
-                    theme().bold(&theme().fg(&ThemeColor::Warning, "Package Updates Available")),
-                    theme().fg(&ThemeColor::Muted, "Package updates are available. Run "),
-                    theme().fg(&ThemeColor::Accent, &format!("{APP_NAME} update --extensions")),
-                    theme().fg(&ThemeColor::Muted, "Packages:"),
-                )
-            }),
-            1,
-            0,
-        );
         self.chat_container.add_child(Arc::new(DynamicBorder::new(Some(warning_border))));
         self.request_render();
     }
