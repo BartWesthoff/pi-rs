@@ -24,12 +24,22 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use rquickjs;
 use rquickjs::qjs;
 
 /// Result of fallible JS operations.
 pub type JsResult<T> = Result<T, JsError>;
+
+/// Bytes of JavaScript source this process has handed to the compiler (summed over every
+/// engine). Used by the startup footprint benchmark (`scripts/perf/packages.py`).
+static COMPILED_JS_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total JS source bytes compiled so far by the process.
+pub fn compiled_js_bytes() -> u64 {
+    COMPILED_JS_BYTES.load(Ordering::Relaxed)
+}
 
 /// Additions of the vendored QuickJS (`vendor/rquickjs-sys/PATCH.md` in the pi-rs repository).
 pub mod ext {
@@ -1519,6 +1529,7 @@ impl Context {
             filename: name.as_ptr(),
             line_num: 1,
         };
+        COMPILED_JS_BYTES.fetch_add(code.len() as u64, Ordering::Relaxed);
         let v = unsafe {
             qjs::JS_Eval2(
                 self.raw,
@@ -3472,5 +3483,19 @@ impl From<JsPromise> for JsValue {
 impl From<JsPromise> for JsObject {
     fn from(p: JsPromise) -> Self {
         p.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_js_bytes_counts_evaluated_source() {
+        let engine = Engine::new(EngineOptions::default()).expect("engine");
+        let mut ctx = engine.context();
+        let before = compiled_js_bytes();
+        ctx.eval(Source::from_bytes(b"1 + 1")).expect("eval");
+        assert_eq!(compiled_js_bytes() - before, 5);
     }
 }

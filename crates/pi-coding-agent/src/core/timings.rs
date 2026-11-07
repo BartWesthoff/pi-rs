@@ -108,4 +108,8 @@ pub fn print_timings() {
             &ns.timings,
         );
     }
+    // JS source handed to the QuickJS compiler so far, for the package footprint benchmark
+    // (`scripts/perf/packages.py`). TS Pi is measured with a `node:module` hook instead.
+    let compiled = pi_jsrt::js::compiled_js_bytes();
+    eprintln!("Compiled JS: {compiled} bytes\n");
 }
