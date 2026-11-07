@@ -108,21 +108,80 @@ impl ProviderHttpError {
         }
     }
 
+    /// The SDKs' `APIConnectionTimeoutError`: no response arrived within the request timeout.
+    pub fn timed_out() -> Self {
+        let mut e = Self::connection("Request timed out.");
+        e.name = "APIConnectionTimeoutError".to_string();
+        e
+    }
+
     /// Map a reqwest transport error to the SDK's connection error messages.
     pub fn from_reqwest(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
-            let mut e = Self::connection("Request timed out.");
-            e.name = "APIConnectionTimeoutError".to_string();
-            e
+            Self::timed_out()
+        } else if let Some(message) = local_connection_refused_message(
+            error.url(),
+            &super::http::NetworkError::from_reqwest(error),
+        ) {
+            // pi-rs divergence (LM-04): a loopback server that refuses the connection is
+            // simply not running, so name its address instead of the SDKs' bare message.
+            Self::connection(message)
+        } else {
+            Self::connection("Connection error.")
+        }
+    }
+
+    /// Map a [`TransportError`](crate::transport::TransportError) to the SDK's connection error
+    /// messages.
+    pub fn from_transport(error: &crate::transport::TransportError) -> Self {
+        if error.is_timeout() {
+            Self::timed_out()
         } else {
             // Like the SDKs' APIConnectionError: the cause is not part of the message.
             Self::connection("Connection error.")
         }
     }
 
+    /// `true` for the loopback "connection refused" error of [`Self::from_reqwest`]: no local
+    /// server is listening, so retrying within seconds cannot succeed.
+    pub fn is_local_connection_refused(&self) -> bool {
+        self.status.is_none() && is_local_connection_refused_message(&self.message)
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.as_ref().and_then(|h| h.get(name)).and_then(|v| v.to_str().ok())
     }
+}
+
+/// The part of the loopback "connection refused" message that marks it (pi-rs divergence LM-04).
+pub const LOCAL_CONNECTION_REFUSED_HINT: &str = "no server is listening; is the local server running?";
+
+/// `true` when `message` is (or contains) the loopback "connection refused" error text.
+pub fn is_local_connection_refused_message(message: &str) -> bool {
+    message.contains(LOCAL_CONNECTION_REFUSED_HINT)
+}
+
+/// `true` when `url` points at this machine (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`).
+pub fn is_loopback_url(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// `Connection refused: <address> (...)` when a request to a loopback URL was refused; `None`
+/// for every other failure and for non-loopback hosts, which keep the SDKs' message.
+fn local_connection_refused_message(url: Option<&reqwest::Url>, cause: &super::http::NetworkError) -> Option<String> {
+    if cause.code != Some("ECONNREFUSED") || !url.is_some_and(is_loopback_url) {
+        return None;
+    }
+    let address = cause.message.strip_prefix("connect ECONNREFUSED ").unwrap_or(&cause.message);
+    Some(format!("Connection refused: {address} ({LOCAL_CONNECTION_REFUSED_HINT})"))
 }
 
 fn status_error_name(status: u16) -> &'static str {
@@ -233,12 +292,57 @@ mod tests {
 
     #[tokio::test]
     async fn connection_failures_read_like_the_sdks() {
+        // Loopback refusals name the address (pi-rs divergence LM-04); the name stays the SDK's.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
         drop(listener);
-        let error = reqwest::Client::new().get(url).send().await.unwrap_err();
+        let error = reqwest::Client::new().get(format!("http://{address}/v1")).send().await.unwrap_err();
         let http = ProviderHttpError::from_reqwest(&error);
-        assert_eq!(http.message, "Connection error.");
+        assert_eq!(
+            http.message,
+            format!("Connection refused: {address} (no server is listening; is the local server running?)")
+        );
         assert_eq!(http.name, "APIConnectionError");
+        assert!(http.status.is_none());
+        assert!(http.is_local_connection_refused());
+
+        // Any other connection failure keeps the SDKs' message.
+        let other = ProviderHttpError::connection("Connection error.");
+        assert!(!other.is_local_connection_refused());
+    }
+
+    #[test]
+    fn loopback_connection_refused_names_the_address() {
+        use super::super::http::NetworkError;
+        let refused = |address: &str| NetworkError {
+            code: Some("ECONNREFUSED"),
+            message: format!("connect ECONNREFUSED {address}"),
+        };
+        let url = |text: &str| reqwest::Url::parse(text).unwrap();
+        for (base, address) in [
+            ("http://127.0.0.1:8084/v1", "127.0.0.1:8084"),
+            ("http://localhost:8080/v1", "localhost:8080"),
+            ("http://[::1]:11434/v1", "::1:11434"),
+            ("http://127.1.2.3:9/v1", "127.1.2.3:9"),
+        ] {
+            let message = local_connection_refused_message(Some(&url(base)), &refused(address)).unwrap();
+            assert_eq!(
+                message,
+                format!("Connection refused: {address} (no server is listening; is the local server running?)")
+            );
+            assert!(ProviderHttpError::connection(message).is_local_connection_refused());
+        }
+        // Remote hosts keep the SDK message; other loopback failures too.
+        assert_eq!(
+            local_connection_refused_message(Some(&url("http://10.0.0.5:8084/v1")), &refused("10.0.0.5:8084")),
+            None
+        );
+        assert_eq!(
+            local_connection_refused_message(Some(&url("https://api.openai.com/v1")), &refused("api.openai.com:443")),
+            None
+        );
+        let reset = NetworkError { code: Some("ECONNRESET"), message: "read ECONNRESET".into() };
+        assert_eq!(local_connection_refused_message(Some(&url("http://127.0.0.1:8084")), &reset), None);
+        assert_eq!(local_connection_refused_message(None, &refused("127.0.0.1:8084")), None);
     }
 }

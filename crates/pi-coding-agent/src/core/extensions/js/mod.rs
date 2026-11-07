@@ -13,10 +13,12 @@
 //! returning [`ExtensionEventResult::Json`], tools become [`ToolDefinition`]s whose closures call
 //! into JS, components become [`JsComponent`]s rendering through blocking calls.
 
+mod ai_subpaths;
 mod api;
 mod builtin;
 mod component;
 mod context;
+mod host_identity;
 mod messages;
 mod native;
 mod provider;
@@ -37,6 +39,7 @@ use crate::core::extensions::runner::ExtensionErrorWithStack;
 use crate::core::extensions::types::*;
 
 pub use component::{JsComponent, JsEditorComponent};
+pub use host_identity::{HOST_IDENTITY, HostIdentity};
 use pi_embed::Embedded;
 
 const BRIDGE_JS: Embedded = pi_embed::include_str!("../../../../js/bridge.js");
@@ -55,6 +58,7 @@ const PI_AI_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai.js");
 const PI_AI_CORE_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai/core.js");
 const PI_AI_FAUX_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai/faux.js");
 const PI_AI_RUST_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai/rust.js");
+const PI_AI_SUBPATHS_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai/subpaths.js");
 const PI_AI_MODELS_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai-models.js");
 const PI_AI_PROVIDERS_ALL_JS: Embedded = pi_embed::include_str!("../../../../js/pi-ai-providers-all.js");
 const PI_AGENT_CORE_JS: Embedded = pi_embed::include_str!("../../../../js/pi-agent-core.js");
@@ -441,6 +445,7 @@ impl JsExtensionHost {
     /// Start a new JS runtime with pi's virtual modules.
     pub async fn new(cwd: &str) -> anyhow::Result<JsExtensionHost> {
         let mut virtual_modules = HashMap::new();
+        let mut subpath_aliases: Vec<(String, String)> = Vec::new();
         virtual_modules.insert(BRIDGE_SPECIFIER.to_string(), VirtualModule::EsmJs(BRIDGE_JS.get().to_string()));
         virtual_modules.insert("pi-rs:marked".to_string(), VirtualModule::EsmJs(MARKED_JS.get().to_string()));
         for (specifier, source) in TYPEBOX_MODULES {
@@ -451,6 +456,13 @@ impl JsExtensionHost {
         virtual_modules.insert("pi-rs:ai-core".to_string(), VirtualModule::EsmJs(PI_AI_CORE_JS.get().to_string()));
         virtual_modules.insert("pi-rs:ai-faux".to_string(), VirtualModule::EsmJs(PI_AI_FAUX_JS.get().to_string()));
         virtual_modules.insert("pi-rs:ai-rust".to_string(), VirtualModule::EsmJs(PI_AI_RUST_JS.get().to_string()));
+        virtual_modules.insert("pi-rs:ai-subpaths".to_string(), VirtualModule::EsmJs(PI_AI_SUBPATHS_JS.get().to_string()));
+        // pi-ai's deep `./providers/*`, `./api/*`, `./utils/*`, `./bedrock-provider` and `./bun-oauth` exports.
+        for (specifier, source) in ai_subpaths::modules() {
+            let alias = specifier.replacen("@earendil-works/", "@mariozechner/", 1);
+            virtual_modules.insert(specifier.clone(), VirtualModule::EsmJs(source));
+            subpath_aliases.push((alias, specifier));
+        }
         virtual_modules.insert("pi-rs:sdk".to_string(), VirtualModule::EsmJs(PI_SDK_JS.get().to_string()));
         virtual_modules.insert("@earendil-works/pi-ai/models".to_string(), VirtualModule::EsmJs(PI_AI_MODELS_JS.get().to_string()));
         virtual_modules
@@ -481,8 +493,15 @@ impl JsExtensionHost {
         ] {
             aliases.insert(from.to_string(), to.to_string());
         }
+        aliases.extend(subpath_aliases);
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "pi".to_string());
+        let env: HashMap<String, String> =
+            std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
         let options = RuntimeOptions {
             cwd: Some(std::path::PathBuf::from(cwd)),
+            env: Some(HOST_IDENTITY.env(env, &exe)),
+            argv: HOST_IDENTITY.argv(&exe, crate::cli::setup::process_args().iter().skip(1).cloned()),
+            versions: HOST_IDENTITY.versions(),
             virtual_modules,
             aliases,
             thread_name: "pi-extensions".to_string(),

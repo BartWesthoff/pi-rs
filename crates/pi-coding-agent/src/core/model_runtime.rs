@@ -40,9 +40,10 @@ use pi_ai::models::{
 use pi_ai::models_store::ModelsStore;
 use pi_ai::providers::model_schema::ModelThinkingLevel;
 use pi_ai::types::{
-    AnyModel, AssistantImages, AssistantMessage, AssistantMessageEventStream, ClassifierContext,
-    ClassifierModel, ClassifierResult, Context, DeferredHandle, ImageModel, ImagesContext,
-    Message, Model, ModelType, ProviderHeaders, StreamOptions,
+    AnyModel, AssistantImages, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream,
+    ClassifierContext, ClassifierModel, ClassifierResult, Context, DeferredHandle, ImageModel,
+    ImagesContext, Message, Model, ModelType, ProviderHeaders, ProviderResponse, StopReason,
+    StreamOptions, TranscriptContext,
 };
 use pi_ai::utils::identity::{ClientIdentityTarget, get_open_code_session_headers};
 use pi_ai::utils::model_operations::{
@@ -55,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 
@@ -293,6 +295,45 @@ struct PreparedRequest {
     provider: Arc<dyn Provider>,
     model: AnyModel,
     options: StreamOptions,
+}
+
+/// The API of the ChatGPT-subscription Codex backend, whose 401s get one forced token refresh.
+const CODEX_RESPONSES_API: &str = "openai-codex-responses";
+
+/// The message shown when stored OAuth credentials no longer authenticate.
+pub fn format_oauth_relogin_message(provider: &str) -> String {
+    format!(
+        "Authentication failed for \"{provider}\". Credentials may have expired or network is unavailable. Run '/login {provider}' to re-authenticate."
+    )
+}
+
+/// One request of [`ModelRuntime::stream_simple_refreshing_on_unauthorized`].
+enum UnauthorizedAttempt {
+    /// The request did not fail with HTTP 401 before its first event: stream it on.
+    Stream(AssistantMessageEventStream),
+    /// The request failed with HTTP 401 before producing output.
+    Unauthorized { error: Box<AssistantMessage>, api_key: Option<String> },
+}
+
+/// A stream that yields `first`, then everything `rest` yields, and ends with its result.
+fn prepend_event(first: AssistantMessageEvent, mut rest: AssistantMessageEventStream) -> AssistantMessageEventStream {
+    let (sender, stream) = AssistantMessageEventStream::new();
+    tokio::spawn(async move {
+        sender.push(first);
+        while let Some(event) = rest.next_event().await {
+            sender.push(event);
+        }
+        sender.end(rest.try_result().await);
+    });
+    stream
+}
+
+/// A stream that ends with `error`.
+fn single_error_stream(error: AssistantMessage) -> AssistantMessageEventStream {
+    let (sender, stream) = AssistantMessageEventStream::new();
+    sender.push(AssistantMessageEvent::Error { reason: StopReason::Error, error });
+    sender.end(None);
+    stream
 }
 
 impl ModelRuntime {
@@ -1215,6 +1256,9 @@ impl ModelRuntime {
             async move {
                 let this = this?;
                 assert_chat_model(&owned)?;
+                if this.refreshes_on_unauthorized(&owned, &request) {
+                    return this.stream_simple_refreshing_on_unauthorized(owned, transcript, request).await;
+                }
                 let prepared = this.prepare_request(AnyModel::Chat(owned), request).await?;
                 let model = prepared.model.into_chat().expect("chat model stays chat");
                 Ok(prepared.provider.stream_simple(&model, &transcript, prepared.options))
@@ -1222,6 +1266,95 @@ impl ModelRuntime {
             .boxed(),
             None,
         )
+    }
+
+    /// Whether a request gets the one forced token refresh and retry on HTTP 401 (pi-rs
+    /// divergence CX-16): a Codex model signed in with stored OAuth credentials, without a
+    /// caller-supplied API key.
+    fn refreshes_on_unauthorized(&self, model: &Model, request: &ModelsRequestOptions) -> bool {
+        model.api == CODEX_RESPONSES_API
+            && request.options.api_key.is_none()
+            && self.is_using_o_auth(&model.provider)
+    }
+
+    /// `stream_simple` for [`Self::refreshes_on_unauthorized`] requests.
+    ///
+    /// pi-rs divergence (CX-16): TypeScript resolves credentials once per request, so a revoked
+    /// or rotated access token that has not reached its expiry fails with the backend's 401 until
+    /// the user runs `/login`. Here a 401 before any output forces one refresh of the stored
+    /// credential (through the usual locked refresh, which skips it when another process already
+    /// rotated the token) and repeats the request once. A second 401, or a failed refresh, ends
+    /// with the re-login message; it never loops.
+    async fn stream_simple_refreshing_on_unauthorized(
+        &self,
+        model: Model,
+        transcript: TranscriptContext,
+        request: ModelsRequestOptions,
+    ) -> anyhow::Result<AssistantMessageEventStream> {
+        let signal = request.options.signal.clone().unwrap_or_default();
+        let (first_error, rejected_access) = match self.start_watching_unauthorized(&model, &transcript, &request).await? {
+            UnauthorizedAttempt::Stream(stream) => return Ok(stream),
+            UnauthorizedAttempt::Unauthorized { error, api_key } => (error, api_key),
+        };
+        let relogin = |mut error: Box<AssistantMessage>| {
+            error.error_message = Some(format_oauth_relogin_message(&model.provider));
+            Ok(single_error_stream(*error))
+        };
+        if let Some(rejected) = rejected_access
+            && let Err(refresh_error) =
+                self.models.refresh_rejected_oauth_credential(&model.provider, &rejected, &signal).await
+        {
+            if signal.is_cancelled() {
+                return Err(refresh_error);
+            }
+            tracing::warn!("Token refresh after HTTP 401 failed for {}: {refresh_error:#}", model.provider);
+            return relogin(first_error);
+        }
+        match self.start_watching_unauthorized(&model, &transcript, &request).await? {
+            UnauthorizedAttempt::Stream(stream) => Ok(stream),
+            UnauthorizedAttempt::Unauthorized { error, .. } => relogin(error),
+        }
+    }
+
+    /// Start one request and wait for its first event. A request that fails with HTTP 401
+    /// before producing output is reported as [`UnauthorizedAttempt::Unauthorized`]; anything
+    /// else streams on unchanged.
+    async fn start_watching_unauthorized(
+        &self,
+        model: &Model,
+        transcript: &TranscriptContext,
+        request: &ModelsRequestOptions,
+    ) -> anyhow::Result<UnauthorizedAttempt> {
+        let unauthorized = Arc::new(AtomicBool::new(false));
+        let mut request = request.clone();
+        let observed = request.options.on_response.take();
+        let flag = unauthorized.clone();
+        request.options.on_response = Some(Arc::new(move |response: ProviderResponse, model: Model| {
+            if response.status == 401 {
+                flag.store(true, Ordering::SeqCst);
+            }
+            match &observed {
+                Some(observed) => observed(response, model),
+                None => async {}.boxed(),
+            }
+        }));
+        let aborted = request.options.signal.clone();
+        let prepared = self.prepare_request(AnyModel::Chat(model.clone()), request).await?;
+        let api_key = prepared.options.api_key.clone();
+        let chat = prepared.model.into_chat().expect("chat model stays chat");
+        let mut stream = prepared.provider.stream_simple(&chat, transcript, prepared.options);
+        let first = stream.next_event().await;
+        if let Some(AssistantMessageEvent::Error { error, .. }) = &first
+            && error.stop_reason == StopReason::Error
+            && unauthorized.load(Ordering::SeqCst)
+            && !aborted.is_some_and(|signal| signal.is_cancelled())
+        {
+            return Ok(UnauthorizedAttempt::Unauthorized { error: Box::new(error.clone()), api_key });
+        }
+        Ok(UnauthorizedAttempt::Stream(match first {
+            Some(first) => prepend_event(first, stream),
+            None => stream,
+        }))
     }
 
     pub async fn complete_simple(

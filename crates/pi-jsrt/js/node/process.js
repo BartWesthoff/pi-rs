@@ -226,9 +226,11 @@ Object.assign(process, {
   // headers too; it satisfies the version checks of the packages in tests/npm_packages.rs.
   // No `napi`/`openssl` entries: native addons cannot load, and the crypto is not OpenSSL.
   version: "v22.19.0",
+  // `config.versions` is the embedder's overlay (`RuntimeOptions::versions`), e.g. pi's `bun`.
   versions: {
     node: "22.19.0", pi_jsrt: config.version, quickjs: "0.16.2", v8: "0.0", uv: "1.51.0", modules: "127",
     zlib: "1.3.1", brotli: "1.1.0", unicode: "16.0",
+    ...config.versions,
   },
   release: { name: "node", lts: "Jod" },
   platform: config.platform,
@@ -501,8 +503,18 @@ function fatal(err) {
 internal.fatal = fatal;
 
 internal.onUncaught = (kind, err, promise) => {
-  // After process.exit() in a worker, the ERR_PROCESS_EXIT unwinding is not an error.
+  // After process.exit() in a worker, the ERR_PROCESS_EXIT unwinding is not an error, including
+  // when a listener below calls process.exit() (synckit's crash guard does).
   if (internal.workerExiting) return true;
+  try {
+    return offerUncaught(kind, err, promise);
+  } catch (thrown) {
+    if (internal.workerExiting) return true;
+    throw thrown;
+  }
+};
+
+function offerUncaught(kind, err, promise) {
   if (kind === "unhandledRejection") {
     if (process.listenerCount("unhandledRejection") > 0) {
       process.emit("unhandledRejection", err, promise);
@@ -539,7 +551,7 @@ internal.onUncaught = (kind, err, promise) => {
     return true;
   }
   return false;
-};
+}
 
 // ---------------------------------------------------------------------------
 // Node mode (src/node.rs): main module, beforeExit/exit

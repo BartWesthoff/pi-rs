@@ -702,7 +702,7 @@ const IMAGE_DISABLED_TEXT: &str = "Image reading is disabled.";
 
 /// Replace images in user and tool-result messages with a text placeholder, deduplicating
 /// consecutive placeholders.
-fn block_images(messages: Vec<Message>) -> Vec<Message> {
+pub(crate) fn block_images(messages: Vec<Message>) -> Vec<Message> {
     fn filter(content: Vec<UserContentBlock>) -> Option<Vec<UserContentBlock>> {
         if !content.iter().any(|c| matches!(c, UserContentBlock::Image(_))) {
             return None;

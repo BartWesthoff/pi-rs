@@ -1,0 +1,623 @@
+{
+  "generator": "TS Pi 1.4.0 (@earendil-works/pi-coding-agent@1.4.0, node v22.23.1)",
+  "scenarios": {
+    "all_packages": {
+      "tools": [
+        "acp_cache",
+        "acp_delegate",
+        "acp_delegate_cancel",
+        "acp_delegate_wait",
+        "acp_read_original_image",
+        "acp_status",
+        "bash",
+        "bg_wait",
+        "compress",
+        "contact_supervisor",
+        "ctx_batch_execute",
+        "ctx_doctor",
+        "ctx_execute",
+        "ctx_execute_file",
+        "ctx_fetch_and_index",
+        "ctx_index",
+        "ctx_insight",
+        "ctx_purge",
+        "ctx_search",
+        "ctx_stats",
+        "ctx_upgrade",
+        "decompress",
+        "edit",
+        "fetch_content",
+        "get_search_content",
+        "mcp",
+        "read",
+        "search_context",
+        "source_check",
+        "subagent",
+        "subagent_supervisor",
+        "todo",
+        "web_search",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "acp"
+        },
+        {
+          "source": "extension",
+          "name": "acp-cache"
+        },
+        {
+          "source": "extension",
+          "name": "acp-fleet"
+        },
+        {
+          "source": "extension",
+          "name": "acp-rule"
+        },
+        {
+          "source": "extension",
+          "name": "ctx-doctor"
+        },
+        {
+          "source": "extension",
+          "name": "ctx-stats"
+        },
+        {
+          "source": "extension",
+          "name": "curator"
+        },
+        {
+          "source": "extension",
+          "name": "google-account"
+        },
+        {
+          "source": "extension",
+          "name": "mcp"
+        },
+        {
+          "source": "extension",
+          "name": "mcp-adapter"
+        },
+        {
+          "source": "extension",
+          "name": "mcp-auth"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-audit"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-debt"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-gain"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-help"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-review"
+        },
+        {
+          "source": "extension",
+          "name": "prompt-workflow"
+        },
+        {
+          "source": "extension",
+          "name": "run"
+        },
+        {
+          "source": "extension",
+          "name": "search"
+        },
+        {
+          "source": "extension",
+          "name": "subagent-cost"
+        },
+        {
+          "source": "extension",
+          "name": "subagents"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-check-profile"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-detach"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-doctor"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-fleet"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-generate-profiles"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-guide"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-inspect-rpc"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-load-profile"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-models"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-profiles"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-refine"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-refresh-provider-models"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-steer"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-stop"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-watchdog"
+        },
+        {
+          "source": "extension",
+          "name": "todos"
+        },
+        {
+          "source": "extension",
+          "name": "websearch"
+        },
+        {
+          "source": "prompt",
+          "name": "council"
+        },
+        {
+          "source": "prompt",
+          "name": "gather-context-and-clarify"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-cleanup"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-research"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-review"
+        },
+        {
+          "source": "prompt",
+          "name": "review-loop"
+        },
+        {
+          "source": "skill",
+          "name": "skill:context-mode"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-doctor"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-index"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-insight"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-purge"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-search"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-stats"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-upgrade"
+        },
+        {
+          "source": "skill",
+          "name": "skill:pi-subagents"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail-audit"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail-review"
+        }
+      ]
+    },
+    "billion_context": {
+      "tools": [
+        "acp_delegate",
+        "acp_delegate_cancel",
+        "acp_delegate_wait",
+        "bash",
+        "edit",
+        "read",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "acp"
+        },
+        {
+          "source": "extension",
+          "name": "acp-cache"
+        },
+        {
+          "source": "extension",
+          "name": "acp-fleet"
+        },
+        {
+          "source": "extension",
+          "name": "acp-rule"
+        }
+      ]
+    },
+    "context_mode": {
+      "tools": [
+        "bash",
+        "ctx_batch_execute",
+        "ctx_doctor",
+        "ctx_execute",
+        "ctx_execute_file",
+        "ctx_fetch_and_index",
+        "ctx_index",
+        "ctx_insight",
+        "ctx_purge",
+        "ctx_search",
+        "ctx_stats",
+        "ctx_upgrade",
+        "edit",
+        "read",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "ctx-doctor"
+        },
+        {
+          "source": "extension",
+          "name": "ctx-stats"
+        },
+        {
+          "source": "skill",
+          "name": "skill:context-mode"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-doctor"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-index"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-insight"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-purge"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-search"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-stats"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ctx-upgrade"
+        }
+      ]
+    },
+    "pi_mcp_adapter": {
+      "tools": [
+        "bash",
+        "edit",
+        "mcp",
+        "read",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "mcp"
+        },
+        {
+          "source": "extension",
+          "name": "mcp-adapter"
+        },
+        {
+          "source": "extension",
+          "name": "mcp-auth"
+        }
+      ]
+    },
+    "pi_subagents": {
+      "tools": [
+        "bash",
+        "bg_wait",
+        "contact_supervisor",
+        "edit",
+        "read",
+        "subagent",
+        "subagent_supervisor",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "prompt-workflow"
+        },
+        {
+          "source": "extension",
+          "name": "run"
+        },
+        {
+          "source": "extension",
+          "name": "subagent-cost"
+        },
+        {
+          "source": "extension",
+          "name": "subagents"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-check-profile"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-detach"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-doctor"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-fleet"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-generate-profiles"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-guide"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-inspect-rpc"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-load-profile"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-models"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-profiles"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-refine"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-refresh-provider-models"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-steer"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-stop"
+        },
+        {
+          "source": "extension",
+          "name": "subagents-watchdog"
+        },
+        {
+          "source": "prompt",
+          "name": "council"
+        },
+        {
+          "source": "prompt",
+          "name": "gather-context-and-clarify"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-cleanup"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-research"
+        },
+        {
+          "source": "prompt",
+          "name": "parallel-review"
+        },
+        {
+          "source": "prompt",
+          "name": "review-loop"
+        },
+        {
+          "source": "skill",
+          "name": "skill:pi-subagents"
+        }
+      ]
+    },
+    "pi_web_access": {
+      "tools": [
+        "bash",
+        "edit",
+        "fetch_content",
+        "get_search_content",
+        "read",
+        "source_check",
+        "web_search",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "curator"
+        },
+        {
+          "source": "extension",
+          "name": "google-account"
+        },
+        {
+          "source": "extension",
+          "name": "search"
+        },
+        {
+          "source": "extension",
+          "name": "websearch"
+        }
+      ]
+    },
+    "ponytail": {
+      "tools": [
+        "bash",
+        "edit",
+        "read",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "ponytail"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-audit"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-debt"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-gain"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-help"
+        },
+        {
+          "source": "extension",
+          "name": "ponytail-review"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail-audit"
+        },
+        {
+          "source": "skill",
+          "name": "skill:ponytail-review"
+        }
+      ]
+    },
+    "probe": {
+      "tools": [
+        "bash",
+        "edit",
+        "probe_tool",
+        "read",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "probe-command"
+        },
+        {
+          "source": "skill",
+          "name": "skill:probe-skill"
+        }
+      ]
+    },
+    "rpiv_ask_user_question": {
+      "tools": [
+        "bash",
+        "edit",
+        "read",
+        "write"
+      ],
+      "commands": []
+    },
+    "rpiv_todo": {
+      "tools": [
+        "bash",
+        "edit",
+        "read",
+        "todo",
+        "write"
+      ],
+      "commands": [
+        {
+          "source": "extension",
+          "name": "todos"
+        }
+      ]
+    }
+  }
+}

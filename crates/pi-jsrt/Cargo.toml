@@ -88,6 +88,8 @@ tokio-tungstenite.workspace = true
 h2 = "0.4"
 socket2 = { version = "0.6", features = ["all"] }
 http = "1"
+# `ext::ReasonPhrase`: the server's HTTP/1 reason phrase for `Response.statusText`.
+hyper = { version = "1", default-features = false, features = ["http1", "client"] }
 rusqlite.workspace = true
 
 [dev-dependencies]

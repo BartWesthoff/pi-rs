@@ -50,6 +50,39 @@ fn events_serialize_with_ts_discriminants() {
 }
 
 #[test]
+fn toolcall_end_carries_the_tagged_tool_call_block() {
+    // TS passes the content block itself, so `toolCall` keeps its `type` discriminant.
+    let tool_call = ToolCall {
+        id: "call_1".into(),
+        name: "read".into(),
+        arguments: json!({"path": "a.txt"}).as_object().unwrap().clone(),
+        ..Default::default()
+    };
+    let event = AssistantMessageEvent::ToolCallEnd {
+        content_index: 1,
+        tool_call: tool_call.clone(),
+        partial: AssistantMessage::default(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        value["toolCall"],
+        json!({"type": "toolCall", "id": "call_1", "name": "read", "arguments": {"path": "a.txt"}})
+    );
+    let text = serde_json::to_string(&value["toolCall"]).unwrap();
+    assert!(
+        text.starts_with(r#"{"type":"toolCall","id":"call_1""#),
+        "{text}"
+    );
+    let AssistantMessageEvent::ToolCallEnd {
+        tool_call: back, ..
+    } = serde_json::from_value(value).unwrap()
+    else {
+        panic!("toolcall_end round trip");
+    };
+    assert_eq!(back, tool_call);
+}
+
+#[test]
 fn tool_constrained_sampling_false() {
     let tool: Tool = serde_json::from_value(json!({
         "name": "t", "description": "d", "parameters": {"type": "object"}, "constrainedSampling": false

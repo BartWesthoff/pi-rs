@@ -10,9 +10,10 @@ extension (plugin) capabilities.
 
 The TypeScript reference is cloned at:
 
-    /tmp/claude-0/-home-user-pi-rs/3420df64-2251-57a4-b9aa-4eb6ba35ed96/scratchpad/src/pi
+    <any checkout of https://github.com/earendil-works/pi at the tag you port against, e.g. `git clone https://github.com/earendil-works/pi.git && git -C pi checkout v1.4.0`>
 
-If it is missing, re-clone: `git clone --depth 1 https://github.com/earendil-works/pi.git <that path>`.
+The golden/differential tests read it from `PI_TS_REF` (generators in `scripts/golden/`, `scripts/golden/run.sh`) or `PI_TS_SOURCE` (example-extension tests); without it they skip (see INFRA-04).
+Third-party Pi packages are checked by the package smoke harness (`crates/pi-coding-agent/tests/packages/`): `scripts/package-fixtures.sh` fetches the pinned packages once, `PI_RS_PKG_FIXTURES=1 cargo test -p pi-coding-agent --test packages` runs them offline, and `scripts/package-golden.sh` re-records the TS Pi 1.4.0 golden.
 Never copy TypeScript into this repository.
 
 ## Crate layout
@@ -27,7 +28,12 @@ Never copy TypeScript into this repository.
 | `packages/tui`                  | `crates/pi-tui`             | Terminal UI framework and components |
 | `packages/mcp`                  | `crates/pi-mcp`             | MCP client, transports, OAuth |
 | `packages/codemode`             | `crates/pi-codemode`        | Code mode runtime (JS scripts calling tools) |
-| (new)                           | `crates/pi-jsrt`            | Embedded JavaScript runtime (QuickJS via rquickjs + oxc TS stripping, ESM loader, Node API shims). Used by extensions and codemode. |
+| (new)                           | `crates/pi-quickjs`         | Embedding API over QuickJS-ng (rquickjs): refcounted values, objects, functions, errors bound to the engine thread. |
+| (new)                           | `crates/pi-jsrt`            | Embedded JavaScript runtime (QuickJS via `pi-quickjs` + oxc TS stripping, ESM loader, Node API shims, Node mode / `pi-jsrt-node`). Used by extensions and codemode. |
+| (new)                           | `crates/pi-json`            | V8-compatible `JSON.parse` messages and JS `JSON.stringify` formatting shared by the crates. |
+| (new)                           | `crates/pi-embed`, `crates/pi-embed-macros` | Compressed embedded text assets (`Embedded::get()`), used for the JS glue and docs. |
+| (new)                           | `crates/pi-durable-jsrt`    | Serves `@earendil-works/pi-durable` and `@earendil-works/chord` to extensions as embedded pi-jsrt modules. |
+| (new)                           | `crates/pi-durable-codec-stock` | Test-only WebAssembly bindings that compile the production durable codec sources for the unchanged stock codec tests. |
 | `packages/coding-agent`         | `crates/pi-coding-agent`    | The `pi` binary (`src/main.rs`) and library |
 | (new)                           | `crates/pi-napi`            | Node-API v8 C function table over QuickJS, so unchanged `.node` addons load in `pi-jsrt` |
 

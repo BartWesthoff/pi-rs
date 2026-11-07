@@ -1,0 +1,6 @@
+{
+  "all_packages": {
+    "missingTools": ["acp_cache", "acp_read_original_image", "acp_status", "compress", "decompress", "search_context"],
+    "closedBy": "G9: billion-context injects these into the provider request through its patched globalThis.fetch and its proxy; pi-rs sends provider HTTP from Rust. Closed by PKGP-10/11/12 (provider transport bridge)"
+  }
+}

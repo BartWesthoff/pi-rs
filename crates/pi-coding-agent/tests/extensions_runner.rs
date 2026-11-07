@@ -1507,13 +1507,68 @@ async fn markdown_transformer_receives_persisted_identity_and_undefined_live_met
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let runner = dir.runner(&result).await;
     let transformers = runner.get_markdown_transformers();
-    for metadata in [json!({}), json!({"messageId": "entry-abc", "timestamp": "2025-01-15T10:30:00.000Z"})] {
+    for metadata in [
+        json!({}),
+        json!({"messageId": "entry-abc", "timestamp": "2025-01-15T10:30:00.000Z"}),
+    ] {
         let mut wire = json!({"messageType": "assistant-thinking", "isStreaming": false, "availableWidth": 78});
-        wire.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        wire.as_object_mut()
+            .unwrap()
+            .extend(metadata.as_object().unwrap().clone());
         let context: MarkdownTransformContext = serde_json::from_value(wire.clone()).unwrap();
         let actual: Value = serde_json::from_str(&transformers[0]("reasoning", &context)).unwrap();
         wire["markdown"] = json!("reasoning");
         wire["live"] = json!(metadata.get("messageId").is_none());
         assert_eq!(actual, wire);
     }
+}
+
+// ----------------------------------------------------------------------------
+// context
+// ----------------------------------------------------------------------------
+
+/// Extensions append plain `{ role: "user", content }` messages from `context` handlers (as
+/// context-mode does); TS sends them on unchanged, so a missing `timestamp` must not reject the
+/// handler's result.
+#[tokio::test(flavor = "multi_thread")]
+async fn context_handlers_can_append_user_messages_without_timestamps() {
+    let dir = ExtDir::new();
+    dir.write(
+        "inject.ts",
+        r#"export default function(pi) {
+	pi.on("context", (event) => {
+		event.messages.push({ role: "user", content: "injected string" });
+		event.messages.push({ role: "user", content: [{ type: "text", text: "injected parts" }] });
+		return { messages: event.messages };
+	});
+}"#,
+    );
+    let result = dir.discover().await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let runner = dir.runner(&result).await;
+    let errors = collect_errors(&runner);
+    let input: Vec<pi_agent::types::AgentMessage> =
+        serde_json::from_value(json!([{ "role": "user", "content": "hello", "timestamp": 1 }]))
+            .unwrap();
+    let out = runner.emit_context(&input).await.unwrap();
+    assert!(
+        errors.lock().is_empty(),
+        "{:?}",
+        errors.lock().iter().map(|e| &e.error).collect::<Vec<_>>()
+    );
+    let out = serde_json::to_value(&out).unwrap();
+    let contents: Vec<Value> = out
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].clone())
+        .collect();
+    assert_eq!(
+        contents,
+        vec![
+            json!("hello"),
+            json!("injected string"),
+            json!([{ "type": "text", "text": "injected parts" }]),
+        ]
+    );
 }

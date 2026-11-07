@@ -1,0 +1,25 @@
+tag: "[object Iterator]"
+proto chain: true
+own keys: []
+proto keys: ["next","return","constructor"]
+constructor: "StatementSyncIterator"
+self iterable: true
+first: [{"[null]":{"done":false,"value":{"[null]":{"i":1}}}},true]
+produced after one: 1
+produced after break: 4
+after break: {"[null]":{"done":true,"value":null}}
+return again: {"[null]":{"done":true,"value":null}}
+drain: [{"[null]":{"done":false,"value":{"[null]":{"v":1}}}},{"[null]":{"done":false,"value":{"[null]":{"v":2}}}},{"[null]":{"done":false,"value":{"[null]":{"v":3}}}},{"[null]":{"done":true,"value":null}}]
+after exhaustion: [{"[null]":{"done":false,"value":{"[null]":{"v":1}}}},{"[null]":{"done":false,"value":{"[null]":{"v":2}}}}]
+spread: [{"[null]":{"v":1}},{"[null]":{"v":2}},{"[null]":{"v":3}}]
+arrays: [[1],[2],[3]]
+two iterators share statement: [{"[null]":{"done":false,"value":{"[null]":{"v":1}}}},{"[null]":{"done":false,"value":{"[null]":{"v":2}}}},{"[null]":{"done":false,"value":{"[null]":{"v":3}}}}]
+all resets iterator: {"[null]":{"done":false,"value":{"[null]":{"v":1}}}}
+params: [{"[null]":{"v":11}},{"[null]":{"v":12}}]
+bind error: {"error":{"name":"Error","message":"Unknown named parameter 'nope'","code":"ERR_INVALID_STATE"}}
+error mid-iteration: [{"ok":{"[null]":{"done":false,"value":{"[null]":{"v":1}}}}},{"error":{"name":"Error","message":"row 2"}},{"ok":{"[null]":{"done":false,"value":{"[null]":{"v":1}}}}}]
+1e6 rows: {"count":1000000,"sum":500000500000,"produced":1000000}
+memory flat: true
+next after close: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+return after close: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+iterate after close: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}

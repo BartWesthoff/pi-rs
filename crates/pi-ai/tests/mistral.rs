@@ -149,7 +149,7 @@ async fn serializes_assistant_thinking_tool_calls_and_results_for_replay() {
                         arguments: json!({ "query": "pi" }).as_object().cloned().unwrap(),
                         ..Default::default()
                     }),
-                ],
+                ].into(),
                 stop_reason: StopReason::ToolUse,
                 timestamp: 1,
                 ..Default::default()

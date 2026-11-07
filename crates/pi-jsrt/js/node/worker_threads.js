@@ -120,6 +120,7 @@ class Worker extends EventEmitter {
       data: data.bytes,
       dataPorts: data.ports,
       dataBuffers: data.buffers,
+      dataSabs: data.sabs,
       limits: { ...kDefaultLimits, ...this.#limits },
     });
     this.#id = r.id;
@@ -220,6 +221,7 @@ internal.workerMain = async ({ file, code, name, threadId, port, data, dataPorts
     new Uint8Array(data),
     dataPorts,
     dataBuffers.map((b) => new Uint8Array(b).buffer),
+    ops.workerDataSabs(),
   ).data;
   for (const [k, v] of init.environmentData ?? []) environmentData.set(k, v);
   internal.workerState = {
@@ -230,9 +232,18 @@ internal.workerMain = async ({ file, code, name, threadId, port, data, dataPorts
     resourceLimits: { ...kDefaultLimits, ...(limits ?? {}) },
     name,
   };
+  process.execArgv = Array.from(ops.config.execArgv ?? []);
   // The parent's 'message' listener lives on the other end; the worker's port keeps the worker
   // alive only while user code listens on it (like Node's parentPort).
   try {
+    // `-r`/`--require` preloads of the worker's env NODE_OPTIONS, then of its execArgv, as in
+    // Node (synckit preloads its crash guard this way).
+    const preloads = [...requirePreloads(splitNodeOptions(process.env.NODE_OPTIONS ?? "")), ...requirePreloads(process.execArgv)];
+    if (preloads.length > 0) {
+      const path = internal.requireBuiltin("path");
+      const preloadRequire = internal.requireBuiltin("module").createRequire(path.join(process.cwd(), "[worker preload]"));
+      for (const spec of preloads) preloadRequire(spec);
+    }
     if (code !== null && code !== undefined) {
       ops.evalScript(code, "[worker eval]");
     } else {
@@ -240,9 +251,52 @@ internal.workerMain = async ({ file, code, name, threadId, port, data, dataPorts
       await import(file);
     }
   } catch (err) {
-    internal.workerFatal(err);
+    // A failure to load is an uncaught exception: the worker's own listeners see it first.
+    try {
+      internal.onUncaught("uncaughtException", err);
+    } catch (thrown) {
+      internal.workerFatal(thrown);
+    }
   }
 };
+
+// NODE_OPTIONS splits on spaces outside double quotes; a backslash escapes inside them.
+function splitNodeOptions(value) {
+  const args = [];
+  let current = "";
+  let quoted = false;
+  let escaped = false;
+  let pending = false;
+  for (const ch of value) {
+    if (escaped) {
+      escaped = false;
+      current += ch;
+    } else if (quoted && ch === "\\") {
+      escaped = true;
+    } else if (ch === '"') {
+      quoted = !quoted;
+      pending = true;
+    } else if (!quoted && ch === " ") {
+      if (current || pending) args.push(current);
+      current = "";
+      pending = false;
+    } else {
+      current += ch;
+    }
+  }
+  if (current || pending) args.push(current);
+  return args;
+}
+
+function requirePreloads(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if ((a === "-r" || a === "--require") && i + 1 < args.length) out.push(args[++i]);
+    else if (a.startsWith("--require=")) out.push(a.slice("--require=".length));
+  }
+  return out;
+}
 
 internal.workerFatal = (err) => {
   if (internal.workerExiting) return;

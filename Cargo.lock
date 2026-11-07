@@ -2930,7 +2930,7 @@ dependencies = [
 
 [[package]]
 name = "pi-agent"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2948,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ai"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "pi-chord"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "futures",
  "indexmap",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "pi-codemode"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "djs-core",
  "djs-prelude",
@@ -3036,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "pi-coding-agent"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "pi-durable"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "pi-durable-codec-stock"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "pi-json",
  "serde",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "pi-durable-jsrt"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "pi-embed"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "flate2",
  "pi-embed-macros",
@@ -3170,14 +3170,14 @@ dependencies = [
 
 [[package]]
 name = "pi-embed-macros"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "flate2",
 ]
 
 [[package]]
 name = "pi-json"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -3186,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "pi-jsrt"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aes",
  "aligned-vec",
@@ -3213,6 +3213,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "http",
+ "hyper",
  "jiff",
  "k256",
  "libc",
@@ -3275,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "pi-mcp"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3310,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "pi-quickjs"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "rquickjs",
  "serde_json",
@@ -3319,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "pi-telemetry"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3337,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "pi-tui"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",

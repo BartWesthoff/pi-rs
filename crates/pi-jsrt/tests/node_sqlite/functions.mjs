@@ -1,0 +1,81 @@
+// User functions and aggregates: argument conversion, return conversion, errors thrown in
+// JS, arity from fn.length, varargs, useBigIntArguments, deterministic (usable in indexes),
+// directOnly, start/step/result/inverse aggregates and window functions.
+import { DatabaseSync } from "node:sqlite";
+import { log, attempt } from "./common.mjs";
+
+const db = new DatabaseSync(":memory:");
+const get = (sql, ...args) => attempt(() => db.prepare(sql).get(...args));
+db.function("types", { varargs: true }, (...a) => a.map((v) => (v instanceof Uint8Array ? "bytes" : v === null ? "null" : typeof v)).join(","));
+log("arg types", get("SELECT types(1, 1.5, 'x', x'00', NULL, 9007199254740991) AS r"));
+log("arg too large", get("SELECT types(9007199254740993) AS r"));
+db.function("btypes", { varargs: true, useBigIntArguments: true }, (...a) => a.map((v) => typeof v).join(","));
+log("bigint args", get("SELECT btypes(1, 9007199254740993, 1.5) AS r"));
+db.function("addf", (a, b) => a + b);
+log("arity", [get("SELECT addf(1, 2) AS r"), get("SELECT addf(1) AS r")]);
+db.function("ret", { varargs: true }, (kind) => ({ int: 3, real: 1.5, text: "t", big: 5n, bigmax: 2n ** 63n, blob: new Uint8Array([1]), nul: null, undef: undefined, bool: true, obj: {}, promise: Promise.resolve(1), nan: NaN })[kind]);
+for (const kind of ["int", "real", "text", "big", "bigmax", "blob", "nul", "undef", "bool", "obj", "promise", "nan"]) {
+  log(`return ${kind}`, get("SELECT ret(?) AS r, typeof(ret(?)) AS t", kind, kind));
+}
+db.function("thrower", () => { throw new RangeError("from js"); });
+log("throws", get("SELECT thrower() AS r"));
+log("throws in exec", attempt(() => db.exec("SELECT thrower()")));
+const thrown = new Error("identity");
+db.function("throwsSame", () => { throw thrown; });
+log("same error object", (() => { try { db.prepare("SELECT throwsSame()").get(); } catch (e) { return e === thrown; } })());
+log("throws string", (() => { db.function("throwsString", () => { throw "plain"; }); try { db.prepare("SELECT throwsString()").get(); } catch (e) { return e; } })());
+log("after throw works", get("SELECT addf(2, 3) AS r"));
+db.function("ctx", function () { return typeof this; });
+log("receiver", get("SELECT ctx() AS r"));
+log("redefine", (() => { db.function("addf", (a, b) => a * b); return db.prepare("SELECT addf(3, 4) AS r").get(); })());
+db.function("det", { deterministic: true }, (x) => x * 2);
+db.function("nondet", (x) => x * 2);
+db.exec("CREATE TABLE t (v INTEGER)");
+log("deterministic index", attempt(() => db.exec("CREATE INDEX t_det ON t (det(v))")));
+log("non-deterministic index", attempt(() => db.exec("CREATE INDEX t_nondet ON t (nondet(v))")));
+db.function("direct", { directOnly: true }, () => 1);
+db.exec("CREATE VIEW v_direct AS SELECT direct() AS d");
+log("directOnly direct", get("SELECT direct() AS r"));
+log("directOnly in view", get("SELECT d FROM v_direct"));
+log("bad options", attempt(() => db.function("x", { varargs: 1 }, () => 1)));
+log("bad options type", attempt(() => db.function("x", null, () => 1)));
+log("bad name", attempt(() => db.function(1, () => 1)));
+log("bad fn", attempt(() => db.function("x", {}, 1)));
+log("too many args", attempt(() => db.function("many", function (...a) { return a.length; }) ?? db.prepare("SELECT many(1) AS r").get()));
+
+for (let i = 1; i <= 6; i++) db.prepare("INSERT INTO t VALUES (?)").run(i);
+db.aggregate("sumint", { start: 0, step: (acc, v) => acc + v });
+log("aggregate", get("SELECT sumint(v) AS r FROM t"));
+log("aggregate empty", get("SELECT sumint(v) AS r FROM t WHERE v > 100"));
+log("aggregate grouped", attempt(() => db.prepare("SELECT v % 2 AS k, sumint(v) AS r FROM t GROUP BY k ORDER BY k").all()));
+db.aggregate("collect", { start: () => [], step: (acc, v) => (acc.push(v), acc), result: (acc) => acc.join("|") });
+log("start fn and result", get("SELECT collect(v) AS r FROM t"));
+log("fresh start per group", attempt(() => db.prepare("SELECT v % 2 AS k, collect(v) AS r FROM t GROUP BY k ORDER BY k").all()));
+db.aggregate("win", { start: 0, step: (a, v) => a + v, inverse: (a, v) => a - v });
+log("window", attempt(() => db.prepare("SELECT v, win(v) OVER (ORDER BY v ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS r FROM t").all()));
+log("not a window", attempt(() => db.prepare("SELECT sumint(v) OVER (ORDER BY v) AS r FROM t").all()));
+db.aggregate("winres", { start: 0, step: (a, v) => a + v, inverse: (a, v) => a - v, result: (a) => `total:${a}` });
+log("window result", attempt(() => db.prepare("SELECT winres(v) OVER (ORDER BY v ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS r FROM t").all()));
+log("window as aggregate", get("SELECT winres(v) AS r FROM t"));
+db.aggregate("multi", { start: 0, step: (a, x, y) => a + x * y });
+log("multi arg", get("SELECT multi(v, 10) AS r FROM t"));
+log("multi arity", get("SELECT multi(v) AS r FROM t"));
+db.aggregate("va", { start: 0, varargs: true, step: (a, ...xs) => a + xs.length });
+log("varargs aggregate", get("SELECT va(v, v, v) AS r FROM t"));
+db.aggregate("bigagg", { start: 0n, useBigIntArguments: true, step: (a, v) => a + v });
+log("bigint aggregate", get("SELECT bigagg(v) AS r, typeof(bigagg(v)) AS t FROM t"));
+db.aggregate("stepthrows", { start: 0, step: () => { throw new TypeError("step failed"); } });
+log("step throws", get("SELECT stepthrows(v) AS r FROM t"));
+db.aggregate("startthrows", { start: () => { throw new Error("start failed"); }, step: (a) => a });
+log("start throws", get("SELECT startthrows(v) AS r FROM t"));
+db.aggregate("resultthrows", { start: 0, step: (a) => a, result: () => { throw new Error("result failed"); } });
+log("result throws", get("SELECT resultthrows(v) AS r FROM t"));
+db.aggregate("objstate", { start: {}, step: (a) => a });
+log("object state result", get("SELECT objstate(v) AS r FROM t"));
+log("aggregate no start", attempt(() => db.aggregate("x", { step: () => 0 })));
+log("aggregate null start", attempt(() => (db.aggregate("nullstart", { start: null, step: (a, v) => (a ?? 0) + v }), db.prepare("SELECT nullstart(v) AS r FROM t").get())));
+log("aggregate bad step", attempt(() => db.aggregate("x", { start: 0, step: 1 })));
+log("aggregate bad inverse", attempt(() => db.aggregate("x", { start: 0, step: () => 0, inverse: 1 })));
+log("aggregate bad flag", attempt(() => db.aggregate("x", { start: 0, step: () => 0, directOnly: "y" })));
+db.close();
+log("function closed", attempt(() => db.function("x", () => 1)));

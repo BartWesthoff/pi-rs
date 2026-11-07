@@ -116,7 +116,7 @@ fn empty_tool_results_use_placeholder() {
                 name: "bash".into(),
                 arguments: json!({ "command": "true" }).as_object().cloned().unwrap(),
                 ..Default::default()
-            })],
+            })].into(),
             api: model.api.clone(),
             provider: model.provider.clone(),
             model: model.id.clone(),
@@ -160,7 +160,7 @@ fn foreign_copilot_item_ids_are_hashed() {
                 .cloned()
                 .unwrap(),
             ..Default::default()
-        })],
+        })].into(),
         api: "openai-responses".into(),
         provider: "github-copilot".into(),
         model: "gpt-5.5".into(),
@@ -196,7 +196,7 @@ fn unique_fallback_message_ids() {
         content: vec![
             AssistantContent::Text(TextContent::new("first answer")),
             AssistantContent::Text(TextContent::new("visible answer")),
-        ],
+        ].into(),
         api: "anthropic-messages".into(),
         provider: "anthropic".into(),
         model: "claude-opus-4-8".into(),
@@ -617,7 +617,7 @@ async fn payload_only(
     context: &TranscriptContext,
     mut options: StreamOptions,
 ) -> Value {
-    options.http_client = Some(refusing_client());
+    options.http_transport = Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(refusing_client())));
     let captured = capture_payload(&mut options);
     let _ = openai_responses::stream(model, context, options)
         .result()
@@ -1222,7 +1222,7 @@ async fn azure_payload(
     mut options: StreamOptions,
     simple: bool,
 ) -> Value {
-    options.http_client = Some(refusing_client());
+    options.http_transport = Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(refusing_client())));
     let captured = capture_payload(&mut options);
     let stream = if simple {
         azure_openai_responses::stream_simple(model, context, options)

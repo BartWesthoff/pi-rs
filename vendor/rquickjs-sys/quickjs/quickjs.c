@@ -423,6 +423,8 @@ struct JSRuntime {
     JSSharedArrayBufferFunctions sab_funcs;
 
     bool can_block; /* true if Atomics.wait can block */
+    /* set by JS_InterruptAtomicsWait (under js_atomics_mutex): Atomics.wait throws */
+    bool atomics_interrupted;
     uint32_t dump_flags : 24;
 
     /* Shape hash table */
@@ -31944,6 +31946,103 @@ JSValue JS_LoadModule(JSContext *ctx, const char *basename,
     return promise;
 }
 
+static void js_promise_set_handled(JSContext *ctx, JSValueConst promise);
+
+/* pi-jsrt patch: whether the graph of `m` can be evaluated synchronously by
+   JS_RequireModule(). `visited` collects the modules already checked. */
+static int js_require_module_check(JSContext *ctx, JSModuleDef *m,
+                                   JSModuleDef ***pvisited, int *pcount,
+                                   int *psize)
+{
+    int i, ret;
+
+    for (i = 0; i < *pcount; i++) {
+        if ((*pvisited)[i] == m)
+            return JS_REQUIRE_MODULE_OK;
+    }
+    if (js_resize_array(ctx, (void **)pvisited, sizeof(**pvisited), psize,
+                        *pcount + 1))
+        return -1;
+    (*pvisited)[(*pcount)++] = m;
+    switch (m->status) {
+    case JS_MODULE_STATUS_EVALUATED:
+        return JS_REQUIRE_MODULE_OK;
+    case JS_MODULE_STATUS_EVALUATING_ASYNC:
+        return JS_REQUIRE_MODULE_ASYNC;
+    case JS_MODULE_STATUS_LINKING:
+    case JS_MODULE_STATUS_EVALUATING:
+        return JS_REQUIRE_MODULE_CYCLE;
+    default:
+        break;
+    }
+    if (m->has_tla)
+        return JS_REQUIRE_MODULE_ASYNC;
+    for (i = 0; i < m->req_module_entries_count; i++) {
+        ret = js_require_module_check(ctx, m->req_module_entries[i].module,
+                                      pvisited, pcount, psize);
+        if (ret != JS_REQUIRE_MODULE_OK)
+            return ret;
+    }
+    return JS_REQUIRE_MODULE_OK;
+}
+
+/* pi-jsrt patch: `require()` of an ES module, as Node does it: load, link
+   and evaluate the module synchronously and return its namespace. Unlike
+   JS_LoadModule() the result needs no promise job, so the host does not run
+   the job queue (which would re-enter a module graph being evaluated). */
+JSValue JS_RequireModule(JSContext *ctx, const char *basename,
+                         const char *filename, int *pstatus)
+{
+    JSModuleDef *m, **visited = NULL;
+    int count = 0, size = 0, status;
+    JSValue promise, ns;
+
+    *pstatus = JS_REQUIRE_MODULE_ERROR;
+    m = js_host_resolve_imported_module(ctx, basename, filename, JS_UNDEFINED);
+    if (!m)
+        return JS_EXCEPTION;
+    if (js_resolve_module(ctx, m) < 0) {
+        js_free_modules(ctx, JS_FREE_MODULE_NOT_RESOLVED);
+        return JS_EXCEPTION;
+    }
+    status = js_require_module_check(ctx, m, &visited, &count, &size);
+    js_free(ctx, visited);
+    if (status < 0)
+        return JS_EXCEPTION;
+    if (status != JS_REQUIRE_MODULE_OK) {
+        *pstatus = status;
+        return JS_UNDEFINED;
+    }
+    if (m->status == JS_MODULE_STATUS_EVALUATED) {
+        if (m->eval_has_exception)
+            return JS_Throw(ctx, js_dup(m->eval_exception));
+    } else {
+        /* no module of the graph has top-level await: evaluation settles
+           the promise before JS_EvalFunction() returns */
+        promise = JS_EvalFunction(ctx, JS_NewModuleValue(ctx, m));
+        if (JS_IsException(promise))
+            return JS_EXCEPTION;
+        status = JS_PromiseState(ctx, promise);
+        if (status == JS_PROMISE_REJECTED) {
+            /* the error is thrown to the caller, it is not an unhandled
+               rejection */
+            js_promise_set_handled(ctx, promise);
+            ns = JS_PromiseResult(ctx, promise);
+            JS_FreeValue(ctx, promise);
+            return JS_Throw(ctx, ns);
+        }
+        JS_FreeValue(ctx, promise);
+        if (status != JS_PROMISE_FULFILLED) {
+            *pstatus = JS_REQUIRE_MODULE_ASYNC;
+            return JS_UNDEFINED;
+        }
+    }
+    ns = JS_GetModuleNamespace(ctx, m);
+    if (!JS_IsException(ns))
+        *pstatus = JS_REQUIRE_MODULE_OK;
+    return ns;
+}
+
 static JSValue js_dynamic_import_job(JSContext *ctx,
                                      int argc, JSValueConst *argv)
 {
@@ -32247,6 +32346,9 @@ static JSValue js_async_module_execution_fulfilled(JSContext *ctx, JSValueConst 
                 JS_FreeValue(ctx, m_obj);
                 JS_FreeValue(ctx, error);
             } else {
+                /* pi-jsrt patch: the module is done (spec: [[AsyncEvaluationOrder]]
+                   is set to done), so later importers must not wait for it */
+                m->async_evaluation = false;
                 js_set_module_evaluated(ctx, m);
             }
         }
@@ -62784,9 +62886,11 @@ typedef struct JSAtomicsWaiter {
     bool linked;
     js_cond_t cond;
     int32_t *ptr;
+    JSRuntime *rt;
 } JSAtomicsWaiter;
 
 static js_once_t js_atomics_once = JS_ONCE_INIT;
+static void js__atomics_init(void);
 static js_mutex_t js_atomics_mutex;
 static struct list_head js_atomics_waiter_list =
     LIST_HEAD_INIT(js_atomics_waiter_list);
@@ -62863,6 +62967,11 @@ static JSValue js_atomics_wait(JSContext *ctx,
     /* XXX: inefficient if large number of waiters, should hash on
        'ptr' value */
     js_mutex_lock(&js_atomics_mutex);
+    if (ctx->rt->atomics_interrupted) {
+        js_mutex_unlock(&js_atomics_mutex);
+        JS_ThrowInterrupted(ctx);
+        return JS_EXCEPTION;
+    }
     if (size_log2 == 3) {
         res = *(int64_t *)ptr != v;
     } else {
@@ -62875,6 +62984,7 @@ static JSValue js_atomics_wait(JSContext *ctx,
 
     waiter = &waiter_s;
     waiter->ptr = ptr;
+    waiter->rt = ctx->rt;
     js_cond_init(&waiter->cond);
     waiter->linked = true;
     list_add_tail(&waiter->link, &js_atomics_waiter_list);
@@ -62887,8 +62997,13 @@ static JSValue js_atomics_wait(JSContext *ctx,
     }
     if (waiter->linked)
         list_del(&waiter->link);
+    res = ctx->rt->atomics_interrupted;
     js_mutex_unlock(&js_atomics_mutex);
     js_cond_destroy(&waiter->cond);
+    if (res) {
+        JS_ThrowInterrupted(ctx);
+        return JS_EXCEPTION;
+    }
     if (ret == -1) {
         return JS_AtomToString(ctx, JS_ATOM_timed_out);
     } else {
@@ -62950,6 +63065,25 @@ static JSValue js_atomics_notify(JSContext *ctx,
         js_mutex_unlock(&js_atomics_mutex);
     }
     return js_int32(n);
+}
+
+void JS_InterruptAtomicsWait(JSRuntime *rt)
+{
+    struct list_head *el, *el1;
+    JSAtomicsWaiter *waiter;
+
+    js_once(&js_atomics_once, js__atomics_init);
+    js_mutex_lock(&js_atomics_mutex);
+    rt->atomics_interrupted = true;
+    list_for_each_safe(el, el1, &js_atomics_waiter_list) {
+        waiter = list_entry(el, JSAtomicsWaiter, link);
+        if (waiter->rt == rt) {
+            list_del(&waiter->link);
+            waiter->linked = false;
+            js_cond_signal(&waiter->cond);
+        }
+    }
+    js_mutex_unlock(&js_atomics_mutex);
 }
 
 static const JSCFunctionListEntry js_atomics_funcs[] = {

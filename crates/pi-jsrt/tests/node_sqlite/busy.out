@@ -1,0 +1,13 @@
+timeout pragma a: {"[null]":{"timeout":0}}
+timeout pragma b: {"[null]":{"timeout":150}}
+b write while locked: {"error":{"name":"Error","message":"database is locked","code":"ERR_SQLITE_ERROR","errcode":5,"errstr":"database is locked"}}
+b waited for timeout: true
+b reads while locked: {"[null]":{"n":0}}
+b exec while locked: {"error":{"name":"Error","message":"database is locked","code":"ERR_SQLITE_ERROR","errcode":5,"errstr":"database is locked"}}
+b in transaction: false
+b immediate busy: {"error":{"name":"Error","message":"database is locked","code":"ERR_SQLITE_ERROR","errcode":5,"errstr":"database is locked"}}
+b failed fast: true
+b write after commit: {"lastInsertRowid":2,"changes":1}
+rows: [{"[null]":{"v":1}},{"[null]":{"v":4}}]
+timeout option type: {"error":{"name":"TypeError","message":"The \"options.timeout\" argument must be an integer.","code":"ERR_INVALID_ARG_TYPE"}}
+timeout option string: {"error":{"name":"TypeError","message":"The \"options.timeout\" argument must be an integer.","code":"ERR_INVALID_ARG_TYPE"}}

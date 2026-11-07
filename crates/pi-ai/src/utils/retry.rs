@@ -22,6 +22,9 @@ static NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN: Lazy<Regex> = Lazy::new(|| {
         "billing",
         "subscription_sharing_usage_limit_exceeded",
         "subscription_sharing_workplace_individual_usage_limit_exceeded",
+        // Zhipu/Z.ai error code 1308: the plan's usage limit, sent as HTTP 429; it resets after
+        // hours. Upstream ends with the look-ahead `(?![0-9])`, spelled out here as an alternation.
+        r#""code"\s*:\s*"?1308(?:[^0-9]|$)"#,
     ])
 });
 
@@ -232,6 +235,11 @@ pub fn is_retryable_assistant_error(message: &AssistantMessage) -> bool {
         return false;
     };
     if NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.is_match(error_message) {
+        return false;
+    }
+    // pi-rs divergence (LM-04): a refused loopback connection means the local server is not
+    // running; the auto-retry backoff (~14 s by default) would only delay the error.
+    if crate::utils::error_body::is_local_connection_refused_message(error_message) {
         return false;
     }
     RETRYABLE_PROVIDER_ERROR_PATTERN.is_match(error_message) || contains_retryable_status_code(error_message)

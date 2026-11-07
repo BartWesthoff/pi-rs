@@ -10,6 +10,7 @@ pub mod headers;
 pub mod http;
 pub mod identity;
 pub mod json_parse;
+pub mod streaming_json;
 /// `JSON.parse` with V8's `SyntaxError` messages (the `pi-json` crate).
 pub use pi_json as js_json;
 pub mod model_operations;

@@ -1,0 +1,18 @@
+script: undefined
+rows: {"[null]":{"a":"1,2","b":"semi;colon"}}
+error midway: {"error":{"name":"Error","message":"no such table: nope","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+after error: {"[null]":{"xs":"1,2,3"}}
+select in exec: undefined
+empty: undefined
+whitespace: undefined
+non-string: {"error":{"name":"TypeError","message":"The \"sql\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+missing: {"error":{"name":"TypeError","message":"The \"sql\" argument must be a string.","code":"ERR_INVALID_ARG_TYPE"}}
+in tx: true
+rolled back: {"[null]":{"m":3}}
+commit without tx: {"error":{"name":"Error","message":"cannot commit - no transaction is active","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+pragma: undefined
+user_version: {"[null]":{"user_version":7}}
+prepare takes first: [{"[null]":{"one":1}}]
+prepare empty: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+prepare comment: {"error":{"name":"Error","message":"statement has been finalized","code":"ERR_INVALID_STATE"}}
+exec closed: {"error":{"name":"Error","message":"database is not open","code":"ERR_INVALID_STATE"}}

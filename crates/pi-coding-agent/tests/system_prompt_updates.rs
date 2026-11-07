@@ -286,6 +286,43 @@ fn register_first_and_second(pi: &ExtensionAPIRef, with_prompt_text: bool) -> an
     Ok(())
 }
 
+// #11495
+#[tokio::test]
+async fn does_not_patch_the_prompt_when_the_active_tools_are_only_reordered() {
+    let harness = create_harness(HarnessOptions::default()).await.unwrap();
+    harness.set_responses(vec![faux_text_message("first").into(), faux_text_message("second").into()]);
+    harness.session.prompt("one", None).await.unwrap();
+    let before = harness.session.get_active_tool_names();
+    assert!(before.len() > 1, "needs several active tools to reorder: {before:?}");
+    let reversed: Vec<String> = before.iter().rev().cloned().collect();
+    harness.session.set_active_tools_by_name(&reversed);
+    assert_eq!(harness.session.get_active_tool_names(), before);
+    harness.session.prompt("two", None).await.unwrap();
+    let system_count = harness.session.messages().iter().filter(|m| m.role() == "system").count();
+    assert_eq!(system_count, 1);
+    harness.cleanup();
+}
+
+#[tokio::test]
+async fn set_active_tools_keeps_kept_tools_in_place_and_appends_new_ones() {
+    let harness = create_harness(HarnessOptions {
+        extension_factories: vec![extension(|pi| register_first_and_second(&pi, false))],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // Narrowing keeps the current relative order, whatever order the names are given in.
+    harness.session.set_active_tools_by_name(&["second".into(), "read".into()]);
+    assert_eq!(harness.session.get_active_tool_names(), vec!["read", "second"]);
+    // A newly active tool is appended after the kept ones.
+    harness.session.set_active_tools_by_name(&["first".into(), "second".into(), "read".into()]);
+    assert_eq!(harness.session.get_active_tool_names(), vec!["read", "second", "first"]);
+    // Dropping one leaves the others in place.
+    harness.session.set_active_tools_by_name(&["first".into(), "read".into()]);
+    assert_eq!(harness.session.get_active_tool_names(), vec!["read", "first"]);
+    harness.cleanup();
+}
+
 #[tokio::test]
 async fn set_active_tools_emits_prompt_sections_and_tool_changes_before_the_next_request() {
     let harness = create_harness(HarnessOptions {

@@ -206,24 +206,36 @@ pub fn apply_openai_custom_headers_env(headers: &mut HeaderList) -> anyhow::Resu
 }
 
 /// Send a JSON POST request; non-2xx responses become [`ProviderHttpError`]s in the SDK's style.
+///
+/// `timeout_ms` bounds the wait for the response head, like the SDKs' `fetchWithTimeout`, which
+/// clears its timer once `fetch` resolves. Reading the body (a stream that may run far longer)
+/// is bounded only by the shared client's idle timeout ([`set_http_idle_timeout`]).
 pub async fn post_json(
-    client: &reqwest::Client,
+    transport: &dyn crate::transport::HttpTransport,
     url: &str,
     headers: &HeaderList,
     body: &serde_json::Value,
     timeout_ms: Option<u64>,
     signal: Option<&tokio_util::sync::CancellationToken>,
     style: super::error_body::SdkErrorStyle,
-) -> anyhow::Result<reqwest::Response> {
+) -> anyhow::Result<crate::transport::HttpResponse> {
     use super::error_body::ProviderHttpError;
-    let mut request = client
-        .post(url)
-        .headers(headers.to_header_map()?)
-        .body(serde_json::to_vec(body)?);
-    if let Some(timeout) = timeout_ms {
-        request = request.timeout(Duration::from_millis(timeout));
-    }
-    let send = request.send();
+    // Validates every header line before anything is sent.
+    headers.to_header_map()?;
+    let request = crate::transport::HttpRequest::post(url)
+        .headers(headers.entries().iter().cloned())
+        .body(serde_json::to_vec(body)?)
+        .signal(signal.cloned());
+    let request = transport.send(request);
+    let send = async move {
+        let sent = match timeout_ms {
+            Some(timeout) => super::wasm::timeout(Duration::from_millis(timeout), request)
+                .await
+                .map_err(|_| ProviderHttpError::timed_out())?,
+            None => request.await,
+        };
+        sent.map_err(|e| ProviderHttpError::from_transport(&e))
+    };
     let result = match signal {
         Some(signal) => {
             if signal.is_cancelled() {
@@ -236,14 +248,14 @@ pub async fn post_json(
         }
         None => send.await,
     };
-    let response = result.map_err(|e| anyhow::Error::new(ProviderHttpError::from_reqwest(&e)))?;
-    let status = response.status();
-    if status.is_success() {
+    let response = result?;
+    if response.is_success() {
         return Ok(response);
     }
-    let response_headers = response.headers().clone();
+    let status = response.status;
+    let response_headers = response.headers.clone();
     let text = response.text().await.unwrap_or_default();
-    Err(ProviderHttpError::from_response(status.as_u16(), response_headers, text, style).into())
+    Err(ProviderHttpError::from_response(status, response_headers, text, style).into())
 }
 
 #[cfg(test)]

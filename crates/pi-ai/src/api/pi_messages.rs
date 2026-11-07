@@ -25,10 +25,10 @@ use crate::utils::diagnostics::{
 };
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record, to_provider_headers};
-use crate::utils::http::client_for;
+use crate::transport::HttpRequest;
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::parse_streaming_json_object;
 use crate::utils::provider_env::get_provider_env_value;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 
 /// Error for a non-2xx pi-messages response.
 #[derive(Debug, Clone)]
@@ -69,14 +69,11 @@ fn truncate_diagnostic_string(value: &str) -> String {
     }
 }
 
-fn status_text(status: reqwest::StatusCode) -> String {
-    status.canonical_reason().unwrap_or_default().to_string()
-}
 
 fn create_pi_messages_response_error(
     model: &Model,
     url: &str,
-    status: reqwest::StatusCode,
+    status: u16,
     body: &str,
 ) -> PiMessagesResponseError {
     let error_body = parse_pi_messages_error_body(body);
@@ -90,16 +87,16 @@ fn create_pi_messages_response_error(
     let code_suffix = code.as_ref().map(|c| format!(" ({c})")).unwrap_or_default();
     let text = format!(
         "{} {}: {suffix}{code_suffix}",
-        status.as_u16(),
-        status_text(status)
+        status,
+        crate::transport::canonical_status_text(status)
     );
     let mut details = Map::new();
     details.insert("version".into(), json!(1));
     details.insert("provider".into(), json!(model.provider));
     details.insert("model".into(), json!(model.id));
     details.insert("url".into(), json!(url));
-    details.insert("status".into(), json!(status.as_u16()));
-    details.insert("statusText".into(), json!(status_text(status)));
+    details.insert("status".into(), json!(status));
+    details.insert("statusText".into(), json!(crate::transport::canonical_status_text(status)));
     if let Some(error) = error {
         details.insert("error".into(), error.clone());
     }
@@ -132,7 +129,7 @@ fn append_rewrite_diagnostic(message: &mut AssistantMessage, rewrite: Option<&Va
 /// Converts serialized pi-messages events into assistant message events.
 struct EventConverter {
     partial: AssistantMessage,
-    tool_json: HashMap<usize, String>,
+    tool_json: HashMap<usize, ToolCallArgumentsStream>,
 }
 
 fn index_of(event: &Value) -> usize {
@@ -296,7 +293,7 @@ impl EventConverter {
                         ..Default::default()
                     }),
                 );
-                self.tool_json.insert(index, String::new());
+                self.tool_json.insert(index, ToolCallArgumentsStream::new());
                 Some(AssistantMessageEvent::ToolCallStart {
                     content_index: index,
                     partial: self.partial.clone(),
@@ -304,10 +301,10 @@ impl EventConverter {
             }
             "toolcall_delta" => {
                 let delta = str_field(event, "delta");
-                let json = self.tool_json.entry(index).or_default();
-                json.push_str(&delta);
-                let arguments = parse_streaming_json_object(Some(json));
-                if let Some(AssistantContent::ToolCall(block)) = self.partial.content.get_mut(index)
+                // Take the block mutably only when the partial arguments changed.
+                if let Some(arguments) = self.tool_json.entry(index).or_default().append(&delta)
+                    && let Some(AssistantContent::ToolCall(block)) =
+                        self.partial.content.get_mut(index)
                 {
                     block.arguments = arguments;
                 }
@@ -391,13 +388,16 @@ impl FrameDecoder {
         self.buffer.push_str(text);
         self.buffer = self.buffer.replace("\r\n", "\n");
         let mut events = Vec::new();
-        while let Some(split) = self.buffer.find("\n\n") {
-            let frame = self.buffer[..split].to_string();
-            self.buffer = self.buffer[split + 2..].to_string();
-            if let Some(event) = parse_pi_messages_event(&frame)? {
+        // Frames are read in place and the consumed prefix is dropped once per chunk.
+        let mut start = 0;
+        while let Some(split) = self.buffer[start..].find("\n\n") {
+            let frame = &self.buffer[start..start + split];
+            start += split + 2;
+            if let Some(event) = parse_pi_messages_event(frame)? {
                 events.push(event);
             }
         }
+        self.buffer.drain(..start);
         Ok(events)
     }
 
@@ -568,34 +568,31 @@ async fn run_stream(
         ])
         .unwrap_or_default();
 
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
-        let mut request = client.post(&url).body(serde_json::to_vec(&payload)?);
+        let client = crate::transport::http_transport_for(&url, &options)?;
+        let mut request = HttpRequest::post(&url).body(serde_json::to_vec(&payload)?).signal(signal.clone());
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
-        let response = with_signal(signal.as_ref(), request.send()).await??;
+        let response = with_signal(signal.as_ref(), client.send(request)).await??;
         if let Some(on_response) = &options.on_response {
             on_response(
                 ProviderResponse {
-                    status: response.status().as_u16(),
-                    headers: headers_to_record(response.headers()),
+                    status: response.status,
+                    headers: headers_to_record(&response.headers),
                 },
                 model.clone(),
             )
             .await;
         }
-        let status = response.status();
-        if !status.is_success() {
+        let status = response.status;
+        if !response.is_success() {
             let body = with_signal(signal.as_ref(), response.text())
                 .await?
                 .unwrap_or_default();
             return Err(create_pi_messages_response_error(&model, &url, status, &body).into());
         }
 
-        let mut body = response.bytes_stream();
+        let mut body = response.body;
         let mut decoder = FrameDecoder::default();
         loop {
             let chunk = with_signal(signal.as_ref(), body.next()).await?;

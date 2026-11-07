@@ -1,0 +1,8 @@
+{
+  "name": "pi-jsrt-pkgp14-fixtures",
+  "private": true,
+  "dependencies": {
+    "undici": "8.12.3",
+    "undici6": "npm:undici@6.29.1"
+  }
+}

@@ -9,6 +9,7 @@ use crate::js::{Context, JsArgs, JsObject, JsResult, JsValue, js_string};
 
 use crate::engine::{self, define_ops, js_str, run_glue, state};
 
+pub(crate) mod atomics;
 pub(crate) mod child_process;
 pub(crate) mod cipher;
 pub(crate) mod crypto;
@@ -224,6 +225,12 @@ const LAZY_GLUE: &[LazyGlue] = &[
         globals: &[],
     },
     LazyGlue {
+        file: "jiti.js",
+        src: pi_embed::include_str!("../../js/jiti.js"),
+        builtins: &["jsrt:jiti"],
+        globals: &[],
+    },
+    LazyGlue {
         file: "web/messaging.js",
         src: pi_embed::include_str!("../../js/web/messaging.js"),
         builtins: &[],
@@ -346,6 +353,7 @@ pub(crate) fn bootstrap(ctx: &mut Context) -> JsResult<()> {
     define_ops(ctx, &ops, crate::loader::LOADER_OPS)?;
     define_ops(ctx, &ops, encoding::OPS)?;
     define_ops(ctx, &ops, crypto::WEB_OPS)?;
+    define_ops(ctx, &ops, atomics::OPS)?;
     define_ops(
         ctx,
         &ops,
@@ -411,6 +419,7 @@ pub(crate) fn teardown(ctx: &mut Context) {
     ws::teardown(ctx);
     ipc::teardown(ctx);
     worker::teardown(ctx);
+    atomics::teardown(ctx);
     signal::teardown(ctx);
     http2::teardown(ctx);
     dgram::teardown(ctx);

@@ -33,7 +33,7 @@ use crate::utils::error_body::{
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::headers_to_record;
 use crate::utils::http::{
-    HeaderList, apply_openai_custom_headers_env, apply_openai_sdk_tenant_headers, client_for, post_json,
+    HeaderList, apply_openai_custom_headers_env, apply_openai_sdk_tenant_headers, post_json,
     stainless_headers,
 };
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
@@ -448,10 +448,10 @@ pub(crate) const MALFORMED_SSE_JSON: &str = "Error reading response: malformed s
 /// `thread.*` events yield `{ event, data }`, and an abort of the request signal ends the stream
 /// without an error (the SDK swallows transport aborts).
 pub(crate) fn openai_sse_events(
-    response: reqwest::Response,
+    response: crate::transport::HttpResponse,
     signal: Option<tokio_util::sync::CancellationToken>,
 ) -> impl Stream<Item = anyhow::Result<Value>> + Unpin + Send {
-    let headers = response.headers().clone();
+    let headers = response.headers.clone();
     let reader = sse_reader(response, signal);
     Box::pin(futures::stream::unfold(
         (reader, headers, false),
@@ -599,10 +599,7 @@ async fn run_stream(
             params = next;
         }
         let url = format!("{}/responses", model.base_url.trim_end_matches('/'));
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = crate::transport::http_transport_for(&url, &options)?;
         let retry = ProviderRetryOptions {
             max_retries: options.max_retries,
             max_retry_delay_ms: options.max_retry_delay_ms,
@@ -612,7 +609,7 @@ async fn run_stream(
         let response = retry_provider_request(
             || {
                 post_json(
-                    &client,
+                    &*client,
                     &url,
                     &headers,
                     &params,
@@ -627,8 +624,8 @@ async fn run_stream(
         if let Some(on_response) = &options.on_response {
             on_response(
                 ProviderResponse {
-                    status: response.status().as_u16(),
-                    headers: headers_to_record(response.headers()),
+                    status: response.status,
+                    headers: headers_to_record(&response.headers),
                 },
                 model.clone(),
             )

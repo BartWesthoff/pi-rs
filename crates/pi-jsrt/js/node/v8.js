@@ -1008,18 +1008,24 @@ function deserialize(buffer) {
 
 // ---------------------------------------------------------------------------
 // Structured clone across runtimes (worker_threads, MessagePort): V8's format with
-// transferred ArrayBuffers (kArrayBufferTransfer) and MessagePorts / cloneable platform
-// objects as host objects.
+// transferred ArrayBuffers (kArrayBufferTransfer), MessagePorts / cloneable platform
+// objects as host objects, and SharedArrayBuffers (kSharedArrayBuffer) by index into `sabs`,
+// whose memory the receiving runtime shares.
 // ---------------------------------------------------------------------------
 
 internal.cloneSerialize = (value, transferList = [], hooks = {}) => {
   const ports = [];
   const buffers = [];
+  const sabs = [];
   const ser = new ValueSerializer({
     _isHostObject: (v) => Boolean(hooks.isHost?.(v)),
     _writeHostObject: (v) => {
       const index = hooks.writeHost(v, ports);
       ser._varint(index);
+    },
+    _getSharedArrayBufferId: (sab) => {
+      const i = sabs.indexOf(sab);
+      return i < 0 ? sabs.push(sab) - 1 : i;
     },
   });
   for (const t of transferList) {
@@ -1040,12 +1046,13 @@ internal.cloneSerialize = (value, transferList = [], hooks = {}) => {
     } catch {}
     return copy;
   });
-  return { bytes, ports, buffers: transferred };
+  return { bytes, ports, buffers: transferred, sabs };
 };
 
-internal.cloneDeserialize = (bytes, buffers = [], hooks = {}) => {
+internal.cloneDeserialize = (bytes, buffers = [], hooks = {}, sabs = []) => {
   const der = new ValueDeserializer(bytes, {
     _readHostObject: () => hooks.readHost(der._varint()),
+    _getSharedArrayBufferFromId: (id) => sabs[id],
   });
   buffers.forEach((ab, i) => der._transfers.set(i, ab));
   der.readHeader();

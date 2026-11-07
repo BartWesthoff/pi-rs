@@ -2,7 +2,8 @@
 //!
 //! Every `MessagePort` (from `MessageChannel`, a worker's `parentPort`, ...) is an entry in a
 //! process-wide registry. A message is the V8 serialization of the value (`js/node/v8.js`) plus
-//! the ids of transferred ports and the bytes of transferred `ArrayBuffer`s; it is queued on the
+//! the ids of transferred ports, the bytes of transferred `ArrayBuffer`s and references to the
+//! memory of the `SharedArrayBuffer`s it contains (shared, not copied); it is queued on the
 //! receiving port and the runtime that owns that port is woken (`internal.portEvent(id,
 //! "wake")`) to drain the queue (`ops.portRecv`). A transferred port has no owner until the
 //! receiving runtime deserializes the message and attaches it; messages sent meanwhile wait in
@@ -17,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use crate::js::JsArray;
-use crate::js::{Context, JsArgs, JsResult, JsValue, js_string};
+use crate::js::{Context, JsArgs, JsResult, JsValue, SharedMemory, js_string};
 use parking_lot::Mutex;
 
 use super::{bytes_arg, bytes_to_js, object};
@@ -28,6 +29,7 @@ pub(crate) struct PortMsg {
     bytes: Vec<u8>,
     ports: Vec<u64>,
     buffers: Vec<Vec<u8>>,
+    sabs: Vec<SharedMemory>,
 }
 
 #[derive(Clone)]
@@ -56,7 +58,7 @@ fn owner(ctx: &Context) -> Owner {
     Owner { poster: state(ctx).poster(), runtime: runtime_key(ctx) }
 }
 
-fn dispatch(ctx: &mut Context, name: &'static str, args: Vec<JsValue>) {
+pub(crate) fn dispatch(ctx: &mut Context, name: &'static str, args: Vec<JsValue>) {
     let Some(internal) = engine::try_internal(ctx) else { return };
     let Ok(f) = internal.get(js_string!(name), ctx) else { return };
     let Some(f) = f.as_function() else { return };
@@ -140,21 +142,40 @@ fn buffer_list(v: &JsValue, ctx: &mut Context) -> JsResult<Vec<Vec<u8>>> {
     Ok(out)
 }
 
-/// `ops.portSend(id, bytes, portIds, buffers) -> bool` (false when the peer is gone).
+/// The memory of each `SharedArrayBuffer` in the array `v`.
+fn sab_list(v: &JsValue, ctx: &mut Context) -> JsResult<Vec<SharedMemory>> {
+    let Some(obj) = v.as_object() else { return Ok(Vec::new()) };
+    let arr = JsArray::from_object(obj)?;
+    let mut out = Vec::new();
+    for i in 0..arr.length(ctx)? {
+        let sab = arr.get(i, ctx)?;
+        out.push(SharedMemory::from_value(&sab, ctx)?.ok_or_else(|| engine::type_error("expected a SharedArrayBuffer"))?);
+    }
+    Ok(out)
+}
+
+/// A `SharedArrayBuffer` of this runtime for each shared memory.
+fn sabs_to_js(sabs: &[SharedMemory], ctx: &mut Context) -> JsResult<JsValue> {
+    let values = sabs.iter().map(|m| m.to_js(ctx)).collect::<JsResult<Vec<_>>>()?;
+    Ok(super::array(ctx, values))
+}
+
+/// `ops.portSend(id, bytes, portIds, buffers, sabs) -> bool` (false when the peer is gone).
 fn op_port_send(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
     let bytes = bytes_arg(args.get_or_undefined(1), ctx)?;
     let ports_v = id_list(args.get_or_undefined(2), ctx)?;
     let buffers = buffer_list(args.get_or_undefined(3), ctx)?;
+    let sabs = sab_list(args.get_or_undefined(4), ctx)?;
     let mut ports = PORTS.lock();
     let Some(peer) = ports.get(&id).map(|p| p.peer) else { return Ok(JsValue::from(false)) };
     let Some(target) = ports.get_mut(&peer) else { return Ok(JsValue::from(false)) };
-    target.queue.push_back(PortMsg { bytes, ports: ports_v, buffers });
+    target.queue.push_back(PortMsg { bytes, ports: ports_v, buffers, sabs });
     wake(&mut ports, peer);
     Ok(JsValue::from(true))
 }
 
-/// `ops.portRecv(id) -> [bytes, portIds, buffers] | undefined`
+/// `ops.portRecv(id) -> [bytes, portIds, buffers, sabs] | undefined`
 fn op_port_recv(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
     let msg = PORTS.lock().get_mut(&id).and_then(|p| p.queue.pop_front());
@@ -171,7 +192,8 @@ fn op_port_recv(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
         buffers.push(JsValue::from(ab));
     }
     let buffers = super::array(ctx, buffers);
-    Ok(super::array(ctx, vec![bytes, ports, buffers]))
+    let sabs = sabs_to_js(&msg.sabs, ctx)?;
+    Ok(super::array(ctx, vec![bytes, ports, buffers, sabs]))
 }
 
 /// `ops.portDetach(id)`: the port is being transferred away; queue its messages.
@@ -272,6 +294,8 @@ struct WorkerCtl {
     rt: Option<JsRuntime>,
     terminated: bool,
     exit_code: Option<i32>,
+    /// The shared memories of `workerData`, until the worker takes them (`workerDataSabs`).
+    data_sabs: Vec<SharedMemory>,
 }
 
 /// Worker runtime (by runtime key) -> (parent poster, worker id), for reports from the worker.
@@ -298,7 +322,7 @@ fn get_list(ctx: &mut Context, o: &JsValue, key: &str) -> JsResult<Vec<String>> 
 }
 
 /// `ops.workerStart({ file, code, argv, execArgv, env: [k, v, ...], name, port, data, dataPorts,
-/// dataBuffers, stdout, stderr }) -> { id, threadId }`
+/// dataBuffers, dataSabs, stdout, stderr }) -> { id, threadId }`
 fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let o = args.get_or_undefined(0).clone();
     let file = get_str(ctx, &o, "file")?;
@@ -312,6 +336,7 @@ fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
     let data = bytes_arg(&obj.get(js_string!("data"), ctx)?, ctx)?;
     let data_ports = id_list(&obj.get(js_string!("dataPorts"), ctx)?, ctx)?;
     let data_buffers = buffer_list(&obj.get(js_string!("dataBuffers"), ctx)?, ctx)?;
+    let data_sabs = sab_list(&obj.get(js_string!("dataSabs"), ctx)?, ctx)?;
     let limits = obj.get(js_string!("limits"), ctx)?;
     let limits = crate::convert::to_json(&limits, ctx).unwrap_or(serde_json::Value::Null);
     let env: HashMap<String, String> = env_flat.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].clone(), c[1].clone())).collect();
@@ -323,7 +348,7 @@ fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
     let poster = st.poster();
     let tokio = st.tokio.clone();
     let cwd = st.cwd.borrow().clone();
-    let ctl = Arc::new(Mutex::new(WorkerCtl { parent: runtime_key(ctx), rt: None, terminated: false, exit_code: None }));
+    let ctl = Arc::new(Mutex::new(WorkerCtl { parent: runtime_key(ctx), rt: None, terminated: false, exit_code: None, data_sabs }));
     WORKERS.lock().insert(id, ctl.clone());
     st.loop_ref(1);
 
@@ -342,6 +367,7 @@ fn op_worker_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
         env: Some(env),
         argv,
         exec_argv,
+        versions: parent.options.versions.clone(),
         tokio: Some(tokio.clone()),
         stdout: Some(Arc::new(move |b: &[u8]| {
             let b = b.to_vec();
@@ -457,6 +483,15 @@ fn op_worker_report(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     Ok(JsValue::undefined())
 }
 
+/// `ops.workerDataSabs() -> SharedArrayBuffer[]`: inside a worker, the shared memories of its
+/// `workerData` (once).
+fn op_worker_data_sabs(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = LINKS.lock().get(&runtime_key(ctx)).map(|(_, id)| *id);
+    let ctl = id.and_then(|id| WORKERS.lock().get(&id).cloned());
+    let sabs = ctl.map(|c| std::mem::take(&mut c.lock().data_sabs)).unwrap_or_default();
+    sabs_to_js(&sabs, ctx)
+}
+
 /// `ops.workerTerminate(id)`
 fn op_worker_terminate(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let id = arg_f64(args, 0, ctx)? as u64;
@@ -496,7 +531,7 @@ pub(crate) fn teardown(ctx: &mut Context) {
 
 pub(crate) const OPS: &[(&str, usize, OpFn)] = &[
     ("portCreatePair", 0, op_port_create_pair),
-    ("portSend", 4, op_port_send),
+    ("portSend", 5, op_port_send),
     ("portRecv", 1, op_port_recv),
     ("portDetach", 1, op_port_detach),
     ("portAttach", 1, op_port_attach),
@@ -508,5 +543,6 @@ pub(crate) const OPS: &[(&str, usize, OpFn)] = &[
     ("workerStart", 1, op_worker_start),
     ("workerTerminate", 1, op_worker_terminate),
     ("workerReport", 2, op_worker_report),
+    ("workerDataSabs", 0, op_worker_data_sabs),
     ("workerRef", 1, op_worker_ref),
 ];

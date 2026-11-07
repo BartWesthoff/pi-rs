@@ -1,7 +1,6 @@
 //! Live port of the "Generate E2E Tests" provider matrix in stream.test.ts.
 
 use pi_ai::compat::{complete, stream};
-use pi_ai::*;
 use serde_json::{Value, json};
 
 use super::matrix::red_circle_base64;

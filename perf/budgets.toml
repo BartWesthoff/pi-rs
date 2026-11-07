@@ -1,0 +1,37 @@
+# Package footprint budgets checked by scripts/perf/packages.py (PKGP-02).
+#
+# PROVISIONAL: these are this baseline's medians with ~2x headroom, so the check is wired and
+# fails on real regressions today. PKGP-22 sets the final numbers.
+#
+# Metrics: ready_ms, timings_ms, extensions_ms, idle_rss_kib, peak_rss_kib, children_idle_rss_kib,
+# children_peak_rss_kib, threads, children, compiled_js_bytes. `[default]` applies to every cell;
+# `["<host>:<configuration>"]` overrides per cell. A cell with no budget is not checked.
+# A median above a budget makes the script exit 1.
+
+[default]
+ready_ms = 4000
+idle_rss_kib = 1200000
+peak_rss_kib = 1200000
+
+["pi-rs:none"]
+ready_ms = 500
+idle_rss_kib = 131072
+compiled_js_bytes = 0
+
+["pi-ts:none"]
+ready_ms = 1500
+idle_rss_kib = 262144
+
+["pi-rs:all"]
+ready_ms = 4000
+idle_rss_kib = 700000
+peak_rss_kib = 750000
+children = 1
+compiled_js_bytes = 28000000
+
+["pi-ts:all"]
+ready_ms = 12000
+idle_rss_kib = 1600000
+peak_rss_kib = 1600000
+children = 1
+compiled_js_bytes = 60000000

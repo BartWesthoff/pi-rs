@@ -9,8 +9,8 @@ use crate::core::compaction::branch_summarization::{
 };
 use crate::core::compaction::compaction::{
     CompactionPreparation, CompactionResult, CompactionSettings, calculate_context_tokens, compact,
-    estimate_context_tokens, estimate_projected_context_tokens, estimate_tokens,
-    prepare_compaction, should_compact,
+    compact_with_chat_prefix, estimate_context_tokens, estimate_projected_context_tokens,
+    estimate_tokens, prepare_compaction, prepare_compaction_chat_prefix, should_compact,
 };
 use crate::core::defaults::THINKING_LEVEL_OPTIONS;
 use crate::core::export_html::tool_renderer::{ToolHtmlRendererDeps, create_tool_html_renderer};
@@ -187,6 +187,7 @@ pub enum AgentSessionEvent {
     TurnStart,
     TurnEnd {
         message: AgentMessage,
+        #[serde(serialize_with = "pi_ai::types::tagged::tool_result_messages")]
         tool_results: Vec<ToolResultMessage>,
     },
     MessageStart {
@@ -796,6 +797,19 @@ fn compaction_settings_model(model: Option<&Model>) -> Option<SettingsManagerGet
     model.map(|m| SettingsManagerGetCompactionSettingsModel::new(m.provider.clone(), m.id.clone()))
 }
 
+/// Default of `compaction.reuseChatPrefix` when it is unset (pi-rs divergence LM-19).
+///
+/// On: `openai-completions` models on a loopback host, whose server keeps the chat's KV cache
+/// between requests. Measured against the standalone request, the summary request then prefills
+/// only the instruction (263–879 new tokens against 2.6K–11.2K) and summarization gets faster
+/// with equal summary quality. Off everywhere else: a cloud provider re-reads the whole chat at
+/// its own cache price, with no local KV reuse to gain.
+fn default_reuse_chat_prefix(model: &Model) -> bool {
+    model.api == pi_ai::types::known_api::OPENAI_COMPLETIONS
+        && reqwest::Url::parse(&model.base_url)
+            .is_ok_and(|url| pi_ai::utils::error_body::is_loopback_url(&url))
+}
+
 /// Error with an extension-facing message (TS `new Error(message)`).
 fn err(message: impl Into<String>) -> anyhow::Error {
     anyhow::anyhow!(message.into())
@@ -879,7 +893,6 @@ struct SessionState {
     /// Messages whose turn_end boundary already ran in `finish_turn`.
     boundary_dispatched_messages: Vec<AgentMessage>,
     last_assistant_message: Option<AssistantMessage>,
-    last_assistant_tool_results: Vec<AgentMessage>,
     last_activity_outcome: AgentActivityOutcome,
     is_before_settle: bool,
     abort_during_before_settle: bool,
@@ -1014,7 +1027,6 @@ impl AgentSession {
                 message_end_replacement: None,
                 boundary_dispatched_messages: Vec::new(),
                 last_assistant_message: None,
-                last_assistant_tool_results: Vec::new(),
                 last_activity_outcome: AgentActivityOutcome::Completed,
                 is_before_settle: false,
                 abort_during_before_settle: false,
@@ -1155,10 +1167,7 @@ impl AgentSession {
             });
         }
         if self.model_runtime.is_using_o_auth(&model.provider) {
-            return Err(err(format!(
-                "Authentication failed for \"{0}\". Credentials may have expired or network is unavailable. Run '/login {0}' to re-authenticate.",
-                model.provider
-            )));
+            return Err(err(crate::core::model_runtime::format_oauth_relogin_message(&model.provider)));
         }
         Err(err(format_no_api_key_found_message(&model.provider)))
     }
@@ -2248,12 +2257,7 @@ impl AgentSession {
         // A turn ends after its assistant message and every tool result has been appended,
         // so this is the first point in the run where a context-only custom message can be
         // inserted without landing between a tool call and its result.
-        if let AgentEvent::TurnEnd { tool_results, .. } = &event {
-            self.state.lock().last_assistant_tool_results = tool_results
-                .iter()
-                .cloned()
-                .map(AgentMessage::ToolResult)
-                .collect();
+        if let AgentEvent::TurnEnd { .. } = &event {
             self.flush_pending_custom_messages();
         }
     }
@@ -2317,13 +2321,14 @@ impl AgentSession {
         None
     }
 
-    fn omit_recovery_attempt(
-        &self,
-        message: &AssistantMessage,
-        tool_results: &[AgentMessage],
-    ) -> anyhow::Result<()> {
-        let mut targets = vec![AgentMessage::Assistant(message.clone())];
-        targets.extend(tool_results.iter().cloned());
+    /// Persistently omit a failed attempt and its tool results from model context. Results are
+    /// found in the projected context, so the pair stays together whether the attempt comes from
+    /// the current run or a resumed session. An unpaired result fails the next request (#11227).
+    fn omit_recovery_attempt(&self, message: &AssistantMessage) -> anyhow::Result<()> {
+        let assistant = AgentMessage::Assistant(message.clone());
+        let tool_results = self.recovery_attempt_tool_results(&assistant, message);
+        let mut targets = vec![assistant];
+        targets.extend(tool_results);
         let target_ids: Vec<Option<String>> = targets
             .iter()
             .map(|t| self.find_persisted_message_entry_id(t))
@@ -2346,6 +2351,54 @@ impl AgentSession {
         }
         self.refresh_finalized_context();
         Ok(())
+    }
+
+    /// Tool results in the projected context that answer `message`'s tool calls, up to the next
+    /// assistant message.
+    fn recovery_attempt_tool_results(
+        &self,
+        assistant: &AgentMessage,
+        message: &AssistantMessage,
+    ) -> Vec<AgentMessage> {
+        let tool_call_ids: HashSet<&str> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AssistantContent::ToolCall(call) => Some(call.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if tool_call_ids.is_empty() {
+            return Vec::new();
+        }
+        // A context edit replaces the projected copy, so match it by source entry as well.
+        let entry_id = self.find_persisted_message_entry_id(assistant);
+        let messages = self.agent.messages();
+        let index = {
+            let state = self.state.lock();
+            messages.iter().position(|m| {
+                m == assistant
+                    || entry_id.as_ref().is_some_and(|id| {
+                        state
+                            .entry_ids_by_message
+                            .iter()
+                            .rev()
+                            .find(|(mapped, _)| mapped == m)
+                            .is_some_and(|(_, mapped_id)| mapped_id == id)
+                    })
+            })
+        };
+        let Some(index) = index else {
+            return Vec::new();
+        };
+        messages[index + 1..]
+            .iter()
+            .take_while(|m| !matches!(m, AgentMessage::Assistant(_)))
+            .filter(|m| {
+                matches!(m, AgentMessage::ToolResult(result) if tool_call_ids.contains(result.tool_call_id.as_str()))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Find the last assistant message in agent state (including aborted ones)
@@ -2430,12 +2483,16 @@ impl AgentSession {
                 message,
                 assistant_message_event,
             } => {
-                let _ = runner
-                    .emit(ExtensionEvent::MessageUpdate(MessageUpdateEvent {
-                        message: message.clone(),
-                        assistant_message_event: (*assistant_message_event).clone(),
-                    }))
-                    .await;
+                // One update per streamed delta: build the extension event only when it has a
+                // listener.
+                if runner.has_handlers("message_update") {
+                    let _ = runner
+                        .emit(ExtensionEvent::MessageUpdate(MessageUpdateEvent {
+                            message: message.clone(),
+                            assistant_message_event: (*assistant_message_event).clone(),
+                        }))
+                        .await;
+                }
                 AgentEvent::MessageUpdate {
                     message,
                     assistant_message_event,
@@ -2812,11 +2869,18 @@ impl AgentSession {
     }
 
     /// Set the agent's tools for the given active tool names and return them.
+    ///
+    /// The active tools are a set: tools that stay active keep their current order and newly
+    /// active ones are appended, so reordering the same names does not change the prompt (#11495).
     fn apply_tool_loadout(&self, tool_names: &[String]) -> Vec<AgentToolRef> {
+        let requested: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
+        let kept: Vec<String> =
+            self.get_active_tool_names().into_iter().filter(|name| requested.contains(name.as_str())).collect();
         let mut seen = HashSet::new();
         let registry = self.state.lock().tool_registry.clone();
-        let tools: Vec<AgentToolRef> = tool_names
+        let tools: Vec<AgentToolRef> = kept
             .iter()
+            .chain(tool_names)
             .filter(|name| seen.insert((*name).clone()))
             .filter_map(|name| {
                 let tool = registry.get(name)?;
@@ -3338,7 +3402,7 @@ impl AgentSession {
     async fn prepare_run(&self, trigger: BeforeAgentStartTrigger) -> anyhow::Result<Vec<AgentMessage>> {
         // Check if we need to compact before sending (catches aborted responses).
         if let Some(last_assistant) = self.find_last_assistant_message() {
-            self.check_compaction(&last_assistant, false, &[]).await;
+            self.check_compaction(&last_assistant, false).await;
         }
 
         let base_options = self.state.lock().base_system_prompt_options.clone();
@@ -3401,11 +3465,10 @@ impl AgentSession {
     }
 
     async fn handle_post_agent_run(&self) -> anyhow::Result<bool> {
-        let (message, tool_results, abort_requested) = {
+        let (message, abort_requested) = {
             let mut state = self.state.lock();
             (
                 state.last_assistant_message.take(),
-                std::mem::take(&mut state.last_assistant_tool_results),
                 state.agent_run_abort_requested,
             )
         };
@@ -3440,7 +3503,7 @@ impl AgentSession {
             self.state.lock().retry_attempt = 0;
         }
 
-        if self.check_compaction(&message, true, &tool_results).await {
+        if self.check_compaction(&message, true).await {
             return Ok(!self.state.lock().agent_run_abort_requested);
         }
 
@@ -3677,8 +3740,8 @@ impl AgentSession {
             if !has_configured_auth {
                 if self.model_runtime.is_using_o_auth(&model.provider) {
                     anyhow::bail!(
-                        "Authentication failed for \"{0}\". Credentials may have expired or network is unavailable. Run '/login {0}' to re-authenticate.",
-                        model.provider
+                        "{}",
+                        crate::core::model_runtime::format_oauth_relogin_message(&model.provider)
                     );
                 }
                 anyhow::bail!("{}", format_no_api_key_found_message(&model.provider));
@@ -4083,16 +4146,17 @@ impl AgentSession {
         self.wait_for_idle().await
     }
 
+    /// Resolves when the session is idle. Like TS's idle-wait promise it resolves at the next idle
+    /// transition, even if another run has started again by the time this waiter resumes.
     pub async fn wait_for_idle(&self) -> anyhow::Result<()> {
         let mut rx = self.idle_tx.subscribe();
-        loop {
-            if self.is_idle() {
-                return Ok(());
-            }
-            if rx.changed().await.is_err() {
-                return Ok(());
-            }
+        if self.is_idle() {
+            return Ok(());
         }
+        // `resolve_idle_wait_if_idle` bumps the counter only on an idle transition; a closed
+        // channel means the session is gone, which leaves nothing to wait for either.
+        let _ = rx.changed().await;
+        Ok(())
     }
 
     // =========================================================================
@@ -4413,6 +4477,7 @@ impl AgentSession {
     async fn run_default_compaction(
         &self,
         preparation: &CompactionPreparation,
+        path_entries: &[SessionEntry],
         model: &Model,
         custom_instructions: Option<&str>,
         signal: CancellationToken,
@@ -4426,8 +4491,45 @@ impl AgentSession {
         let callbacks = self.summarization_retry_callbacks(SummarizationRetrySource::Compaction {
             reason,
         });
-        compact(
+        // Overflow recovery: the chat context no longer fits, so replaying it cannot work.
+        let chat_prefix = if reason != CompactionReason::Overflow
+            && self.reuse_chat_prefix_for_compaction(model, &request.model)
+        {
+            prepare_compaction_chat_prefix(path_entries)
+        } else {
+            None
+        };
+        let Some(chat_prefix) = chat_prefix else {
+            return compact(
+                preparation,
+                &request.model,
+                request.api_key.as_deref(),
+                request.headers.as_ref(),
+                custom_instructions,
+                Some(signal),
+                Some(request.thinking_level),
+                self.agent.stream_fn(),
+                request.env.as_ref(),
+                Some(&retry),
+                Some(&callbacks),
+                None,
+            )
+            .await;
+        };
+        // Convert the prefix as the agent converts its context, so the request matches the chat.
+        let settings_manager = self.settings_manager.clone();
+        let convert = move |messages: &[AgentMessage]| -> Vec<Message> {
+            let converted = convert_to_llm(messages);
+            if settings_manager.get_block_images() {
+                crate::core::sdk::block_images(converted)
+            } else {
+                converted
+            }
+        };
+        compact_with_chat_prefix(
             preparation,
+            &chat_prefix,
+            &convert,
             &request.model,
             request.api_key.as_deref(),
             request.headers.as_ref(),
@@ -4441,6 +4543,20 @@ impl AgentSession {
             None,
         )
         .await
+    }
+
+    /// Whether compaction summarizes with the chat prefix (`compaction.reuseChatPrefix`, LM-19).
+    /// Only when the summary goes to the chat's own model: another model has no cached chat state.
+    fn reuse_chat_prefix_for_compaction(&self, selected_model: &Model, request_model: &Model) -> bool {
+        let same_model = !is_virtual_model(selected_model)
+            && selected_model.provider == request_model.provider
+            && selected_model.id == request_model.id
+            && selected_model.base_url == request_model.base_url;
+        same_model
+            && self
+                .settings_manager
+                .get_compaction_reuse_chat_prefix()
+                .unwrap_or_else(|| default_reuse_chat_prefix(request_model))
     }
 
     fn clear_manual_compaction_state(&self) {
@@ -4512,6 +4628,7 @@ impl AgentSession {
                 None => {
                     self.run_default_compaction(
                         &preparation,
+                        &path_entries,
                         &model,
                         custom_instructions,
                         abort.clone(),
@@ -4647,7 +4764,6 @@ impl AgentSession {
         &self,
         assistant_message: &AssistantMessage,
         skip_aborted_check: bool,
-        tool_results: &[AgentMessage],
     ) -> bool {
         let model = self.model();
         let Ok(settings) = self.compaction_settings(model.as_ref()) else {
@@ -4768,7 +4884,7 @@ impl AgentSession {
 
             // Persistently omit the selected final attempt before post-run recovery compaction.
             self.state.lock().overflow_recovery_attempted = true;
-            if let Err(error) = self.omit_recovery_attempt(assistant_message, tool_results) {
+            if let Err(error) = self.omit_recovery_attempt(assistant_message) {
                 tracing::warn!("{error}");
                 return false;
             }
@@ -4821,7 +4937,7 @@ impl AgentSession {
         assistant_message: &AssistantMessage,
         skip_aborted_check: bool,
     ) -> bool {
-        self.check_compaction(assistant_message, skip_aborted_check, &[])
+        self.check_compaction(assistant_message, skip_aborted_check)
             .await
     }
 
@@ -4910,8 +5026,15 @@ impl AgentSession {
             let computed = match extension_compaction {
                 Some(compaction) => compaction,
                 None => {
-                    self.run_default_compaction(&preparation, &model, None, token.clone(), reason)
-                        .await?
+                    self.run_default_compaction(
+                        &preparation,
+                        &path_entries,
+                        &model,
+                        None,
+                        token.clone(),
+                        reason,
+                    )
+                    .await?
                 }
             };
             if token.is_cancelled() {
@@ -5658,7 +5781,7 @@ impl AgentSession {
         });
 
         // Keep the failed attempt in raw history while durably omitting it from model projection.
-        if let Err(error) = self.omit_recovery_attempt(message, &[]) {
+        if let Err(error) = self.omit_recovery_attempt(message) {
             tracing::warn!("{error}");
         }
 
@@ -7036,6 +7159,27 @@ mod tests {
         assert_eq!(no_message.user_message, None);
         assert!(parse_skill_block("plain text").is_none());
         assert!(parse_skill_block("<skill name=\"a\" location=\"b\">\nc\n</skill>trailing").is_none());
+    }
+
+    /// `compaction.reuseChatPrefix` is on for a local `openai-completions` server only.
+    #[test]
+    fn reuse_chat_prefix_defaults_to_loopback_openai_completions() {
+        let model = |api: &str, base_url: &str| -> Model {
+            serde_json::from_value(serde_json::json!({
+                "id": "m", "name": "m", "api": api, "provider": "p", "baseUrl": base_url,
+                "reasoning": false, "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 128000, "maxTokens": 8192,
+            }))
+            .unwrap()
+        };
+        for local in ["http://127.0.0.1:8084/v1", "http://localhost:8091/v1", "http://[::1]:9000/v1"] {
+            assert!(default_reuse_chat_prefix(&model("openai-completions", local)), "{local}");
+        }
+        assert!(!default_reuse_chat_prefix(&model("openai-completions", "https://api.example.com/v1")));
+        // Another API has no local cache in the chat's shape, even on a loopback host.
+        assert!(!default_reuse_chat_prefix(&model("openai-responses", "http://127.0.0.1:8084/v1")));
+        assert!(!default_reuse_chat_prefix(&model("openai-completions", "not a url")));
     }
 
     #[test]

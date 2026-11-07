@@ -1200,6 +1200,9 @@ typedef int JSInterruptHandler(JSRuntime *rt, void *opaque);
 JS_EXTERN void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque);
 /* if can_block is true, Atomics.wait() can be used */
 JS_EXTERN void JS_SetCanBlock(JSRuntime *rt, bool can_block);
+/* Wake this runtime's threads blocked in Atomics.wait; from now on Atomics.wait throws an
+   uncatchable "interrupted" error in it. Callable from any thread while `rt` is alive. */
+JS_EXTERN void JS_InterruptAtomicsWait(JSRuntime *rt);
 /* set the [IsHTMLDDA] internal slot */
 JS_EXTERN void JS_SetIsHTMLDDA(JSContext *ctx, JSValueConst obj);
 
@@ -1305,6 +1308,20 @@ JS_EXTERN JSAtom JS_GetScriptOrModuleName(JSContext *ctx, int n_stack_levels);
 /* only exported for os.Worker() */
 JS_EXTERN JSValue JS_LoadModule(JSContext *ctx, const char *basename,
                                 const char *filename);
+/* pi-jsrt patch: `require()` of an ES module (Node's require(esm)): load, link and evaluate
+   `filename` synchronously, without running promise jobs. `*pstatus` is one of
+   JSRequireModuleStatus. Returns the namespace (JS_REQUIRE_MODULE_OK), JS_EXCEPTION with a
+   pending exception (JS_REQUIRE_MODULE_ERROR) or JS_UNDEFINED: the graph has top-level await
+   (JS_REQUIRE_MODULE_ASYNC) or contains a module that is being linked or evaluated
+   (JS_REQUIRE_MODULE_CYCLE). */
+typedef enum JSRequireModuleStatus {
+    JS_REQUIRE_MODULE_OK,
+    JS_REQUIRE_MODULE_ERROR,
+    JS_REQUIRE_MODULE_ASYNC,
+    JS_REQUIRE_MODULE_CYCLE,
+} JSRequireModuleStatus;
+JS_EXTERN JSValue JS_RequireModule(JSContext *ctx, const char *basename,
+                                   const char *filename, int *pstatus);
 
 /* C function definition */
 typedef enum JSCFunctionEnum {  /* XXX: should rename for namespace isolation */

@@ -1,6 +1,6 @@
 # pi-rs
 
-A Rust port of [pi](https://github.com/earendil-works/pi), the minimal, extensible coding agent
+A Rust port of [pi](https://github.com/earendil-works/pi) 1.4.0, the minimal, extensible coding agent
 harness. It builds a single native `pi` binary with the same CLI, terminal UI, on-disk formats
 (sessions, settings, `auth.json`, `models.json`), RPC protocol and extension API as the
 TypeScript version. No Node.js or Bun is needed at runtime: TypeScript extensions run on an
@@ -138,6 +138,28 @@ Behavior that still differs from TypeScript pi, and why:
   literally instead of failing in `fileURLToPath`.
 - **Extension API details.** `ctx.getSystemPromptOptions()` returns a copy, so mutating it outside
   `before_agent_start` does not change later turns as mutating TypeScript's live object would.
+- **Provider error handling beyond TypeScript.** Three deliberate additions:
+  - A request to a loopback base URL (`localhost`, `127.0.0.0/8`, `::1`) whose connection is
+    refused fails with `Connection refused: 127.0.0.1:8084 (no server is listening; is the local
+    server running?)` instead of the SDKs' `Connection error.`, and is not retried, neither by the
+    SDK retry policy nor by auto-retry: nothing listens on that port, and a local server takes
+    longer to start than the ~14 s the default backoff waits. Other hosts and other connection
+    failures keep the SDK message and retries.
+  - A `usage_limit_reached` `error` event on the Codex WebSocket reads `You have hit your ChatGPT
+    usage limit (<plan> plan). Try again in ~N min.`, as the HTTP (SSE) path already does in
+    TypeScript, instead of `Codex error: <message>`.
+  - When the Codex backend answers HTTP 401 before any output to a request signed in with
+    stored OAuth credentials, the credential is refreshed once (through the usual locked refresh,
+    which skips it when another process already rotated the token) and the request is repeated
+    once. A second 401, or a failed refresh, ends with the `/login` message.
+- **Compaction summary requests on a local server.** With `compaction.reuseChatPrefix` (default
+  on for `openai-completions` models whose base URL is a loopback host, off elsewhere), the
+  summary request replays the chat's messages as the request prefix and appends one instruction
+  message, so a local server keeps its KV cache; TypeScript sends a standalone system prompt with
+  the conversation serialized into a user message. When the replay is unusable (the model answers
+  with a tool call, the request fails, or compaction is recovering from context overflow) pi-rs
+  falls back to TypeScript's standalone requests. The setting defaults off for every other
+  provider and model, where the requests are byte-identical to TypeScript's.
 - **Unverified.** The Bedrock error text when a stream is aborted mid-response (HTTP/2 close) has
   not been compared with the AWS SDK.
 

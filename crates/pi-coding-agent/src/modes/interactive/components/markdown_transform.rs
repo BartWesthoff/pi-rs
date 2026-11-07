@@ -32,9 +32,13 @@ impl CreateMarkdownTransformMessageType {
     }
 }
 
+/// Whether the message is streaming, read per transform so a reused component sees a stream end.
+pub type IsStreamingFn = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Applies extension Markdown transformers. `is_streaming` is read per transform.
 pub fn create_markdown_transform(
     message_type: CreateMarkdownTransformMessageType,
-    is_streaming: bool,
+    is_streaming: IsStreamingFn,
     transformers: &[MarkdownTransformer],
     message_id: Option<&str>,
     timestamp: Option<&str>,
@@ -45,7 +49,7 @@ pub fn create_markdown_transform(
     Arc::new(move |markdown: String, available_width: i64| {
         let context = MarkdownTransformContext {
             message_type: message_type.context_type(),
-            is_streaming,
+            is_streaming: is_streaming(),
             available_width: available_width.max(0) as usize,
             message_id: message_id.clone(),
             timestamp: timestamp.clone(),
@@ -57,7 +61,7 @@ pub fn create_markdown_transform(
 /// [`create_markdown_transform`] as the transform hook of pi-tui's `Markdown`.
 pub(crate) fn markdown_transform_fn(
     message_type: CreateMarkdownTransformMessageType,
-    is_streaming: bool,
+    is_streaming: IsStreamingFn,
     transformers: &[MarkdownTransformer],
     message_id: Option<&str>,
     timestamp: Option<&str>,

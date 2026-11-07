@@ -11,8 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +20,7 @@ use super::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_
 use super::simple_options::build_base_options;
 use super::transform_messages::transform_messages;
 use crate::models::{ProviderStreams, calculate_cost, clamp_thinking_level};
+use crate::transport::HttpRequest;
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Message, Model, ModelInputModality,
     ModelThinkingLevel, ProviderHeaders, ProviderResponse, StopReason, StreamOptions, TextContent, ThinkingContent,
@@ -31,8 +31,8 @@ use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEv
 use crate::utils::hash::short_hash;
 use crate::utils::headers::headers_to_record;
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::text::{
     get_system_message_text, get_system_message_text_is_empty, render_system_message_update,
     render_system_message_update_is_empty,
@@ -426,7 +426,7 @@ fn chat_url(base_url: &str) -> anyhow::Result<String> {
     Ok(base.join("v1/chat/completions")?.to_string())
 }
 
-type ByteStream = std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+type ByteStream = crate::transport::ResponseBody;
 
 enum MistralEvent {
     Data(Value),
@@ -493,23 +493,39 @@ impl MistralEventReader {
         }
     }
 
+    /// Queue the complete events in the buffer; returns true at `[DONE]`. Events are read in place
+    /// and the consumed prefix is dropped once.
+    fn take_events(
+        &mut self,
+        queue: &mut std::collections::VecDeque<Value>,
+    ) -> anyhow::Result<bool> {
+        let mut start = 0;
+        let mut done = false;
+        while let Some((offset, length)) = find_boundary(&self.buffer[start..]) {
+            let event = parse_event(&self.buffer[start..start + offset]);
+            start += offset + length;
+            match event? {
+                Some(MistralEvent::Done) => {
+                    done = true;
+                    break;
+                }
+                Some(MistralEvent::Data(event)) => queue.push_back(event),
+                None => {}
+            }
+        }
+        self.buffer.drain(..start);
+        Ok(done)
+    }
+
     /// The next event; `Ok(None)` at the end of the stream or after `[DONE]`.
     async fn next(&mut self, queue: &mut std::collections::VecDeque<Value>) -> anyhow::Result<bool> {
         loop {
             if self.finished {
                 return Ok(false);
             }
-            while let Some((index, length)) = find_boundary(&self.buffer) {
-                let raw = self.buffer[..index].to_string();
-                self.buffer = self.buffer[index + length..].to_string();
-                match parse_event(&raw)? {
-                    Some(MistralEvent::Done) => {
-                        self.finished = true;
-                        return Ok(!queue.is_empty());
-                    }
-                    Some(MistralEvent::Data(event)) => queue.push_back(event),
-                    None => {}
-                }
+            if self.take_events(queue)? {
+                self.finished = true;
+                return Ok(!queue.is_empty());
             }
             if !queue.is_empty() {
                 return Ok(true);
@@ -535,17 +551,9 @@ impl MistralEventReader {
                         let rest = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
                         self.buffer.push_str(&rest);
                     }
-                    while let Some((index, length)) = find_boundary(&self.buffer) {
-                        let raw = self.buffer[..index].to_string();
-                        self.buffer = self.buffer[index + length..].to_string();
-                        match parse_event(&raw)? {
-                            Some(MistralEvent::Done) => {
-                                self.finished = true;
-                                return Ok(!queue.is_empty());
-                            }
-                            Some(MistralEvent::Data(event)) => queue.push_back(event),
-                            None => {}
-                        }
+                    if self.take_events(queue)? {
+                        self.finished = true;
+                        return Ok(!queue.is_empty());
                     }
                     if !self.buffer.trim().is_empty() {
                         let raw = std::mem::take(&mut self.buffer);
@@ -569,17 +577,16 @@ async fn request_mistral_stream(
 ) -> anyhow::Result<MistralEventReader> {
     let url = chat_url(&model.base_url)?;
     let headers = build_headers(model, api_key, options);
-    let client = match &options.http_client {
-        Some(client) => client.clone(),
-        None => crate::utils::http::client_for(&url, options.env.as_ref())?,
-    };
-    let mut request = client.post(&url).body(serde_json::to_vec(&to_mistral_wire_payload(payload))?);
+    let client = crate::transport::http_transport_for(&url, options)?;
+    let mut request = HttpRequest::post(&url)
+        .body(serde_json::to_vec(&to_mistral_wire_payload(payload))?)
+        .signal(options.signal.clone());
     for (name, value) in &headers {
         request = request.header(name.as_str(), value.as_str());
     }
     // The timeout covers only the wait for response headers; long streams must not be cut off.
     let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_HEADER_TIMEOUT_MS);
-    let send = crate::utils::wasm::timeout(Duration::from_millis(timeout_ms), request.send());
+    let send = crate::utils::wasm::timeout(Duration::from_millis(timeout_ms), client.send(request));
     let response = match &options.signal {
         Some(signal) => {
             if signal.is_cancelled() {
@@ -594,21 +601,21 @@ async fn request_mistral_stream(
     };
     let response = match response {
         Err(_) => anyhow::bail!("Mistral response headers timed out after {timeout_ms}ms"),
-        Ok(result) => result.map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed::new(&e)))?,
+        Ok(result) => result.map_err(|e| anyhow::Error::new(crate::utils::http::FetchFailed { cause: e.network_error() }))?,
     };
     if let Some(on_response) = &options.on_response {
-        on_response(ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) }, model.clone())
+        on_response(ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) }, model.clone())
             .await;
     }
-    let status = response.status();
-    if !status.is_success() {
-        let status_text = status.canonical_reason().unwrap_or_default().to_string();
+    let status = response.status;
+    if !response.is_success() {
+        let status_text = response.status_text.clone();
         let body = response.text().await.unwrap_or_default();
-        let message = if status_text.is_empty() { format!("Request failed with status {}", status.as_u16()) } else { status_text };
-        return Err(MistralHttpError { status_code: status.as_u16(), body, message }.into());
+        let message = if status_text.is_empty() { format!("Request failed with status {status}") } else { status_text };
+        return Err(MistralHttpError { status_code: status, body, message }.into());
     }
     Ok(MistralEventReader {
-        body: Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())),
+        body: response.body,
         buffer: String::new(),
         pending: Vec::new(),
         signal: options.signal.clone(),
@@ -650,7 +657,7 @@ struct StreamState {
     current: Option<usize>,
     /// Tool call blocks by stream key (`index` or id) with their raw argument text.
     tool_blocks: IndexMap<String, usize>,
-    partial_args: HashMap<usize, String>,
+    partial_args: HashMap<usize, ToolCallArgumentsStream>,
 }
 
 fn finish_current(state: &mut StreamState, output: &AssistantMessage, sender: &AssistantMessageEventSender) {
@@ -780,7 +787,7 @@ fn consume_chunk(chunk: &Value, model: &Model, output: &mut AssistantMessage, se
                 output.content.push(AssistantContent::ToolCall(ToolCall { id: call_id, name: name.to_string(), ..Default::default() }));
                 let position = output.content.len() - 1;
                 state.tool_blocks.insert(key, position);
-                state.partial_args.insert(position, String::new());
+                state.partial_args.insert(position, ToolCallArgumentsStream::new());
                 sender.push(AssistantMessageEvent::ToolCallStart { content_index: position, partial: output.clone() });
                 position
             }
@@ -790,10 +797,10 @@ fn consume_chunk(chunk: &Value, model: &Model, output: &mut AssistantMessage, se
             Some(Value::Null) | None => "{}".to_string(),
             Some(other) => other.to_string(),
         };
-        let partial = state.partial_args.entry(position).or_default();
-        partial.push_str(&args_delta);
-        let parsed = parse_streaming_json_object(Some(partial));
-        if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
+        // Take the block mutably only when the partial arguments changed.
+        if let Some(parsed) = state.partial_args.entry(position).or_default().append(&args_delta)
+            && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position)
+        {
             block.arguments = parsed;
         }
         sender.push(AssistantMessageEvent::ToolCallDelta { content_index: position, delta: args_delta, partial: output.clone() });
@@ -837,8 +844,7 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
         }
         finish_current(&mut state, &output, &sender);
         for position in state.tool_blocks.values().copied().collect::<Vec<_>>() {
-            let partial = state.partial_args.remove(&position).unwrap_or_default();
-            let parsed = parse_tool_call_arguments(Some(&partial));
+            let parsed = state.partial_args.remove(&position).unwrap_or_default().finish();
             if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
                 block.arguments = parsed.arguments;
                 block.arguments_error = parsed.arguments_error;

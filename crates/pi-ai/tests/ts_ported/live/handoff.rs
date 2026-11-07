@@ -4,7 +4,6 @@
 use pi_ai::compat::{complete, complete_simple};
 use pi_ai::env_api_keys::get_env_api_key;
 use pi_ai::providers::all::get_builtin_model;
-use pi_ai::*;
 use serde_json::{Value, json};
 
 use super::*;
@@ -386,7 +385,7 @@ async fn openai_responses_reasoning_replay_e2e() {
                 .cloned()
                 .expect("Missing thinking signature from OpenAI Responses");
             let mut corrupted = first.clone();
-            corrupted.content = vec![thinking];
+            corrupted.content = vec![thinking].into();
             corrupted.stop_reason = StopReason::Aborted;
             let history = vec![user, value(&corrupted), json!({"role": "user", "content": "Say hello to confirm you can continue.", "timestamp": now()})];
             let response = complete(&model, &messages_context("You are a helpful assistant.", history, double_tool()), effort(keys[0].clone(), "high")).await;

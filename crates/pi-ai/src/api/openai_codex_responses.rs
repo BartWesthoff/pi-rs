@@ -20,18 +20,6 @@ use futures::{FutureExt, SinkExt, StreamExt};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
 use super::constrained_sampling::create_grammar_tool_input_properties;
@@ -45,7 +33,7 @@ use super::openai_responses_shared::{
 use super::simple_options::build_base_options;
 use crate::models::ProviderStreams;
 use crate::types::{
-    AssistantMessage, AssistantMessageEvent, CacheRetention, Message, Model, ProviderEnv,
+    AssistantMessage, AssistantMessageEvent, CacheRetention, Message, Model,
     ProviderHeaders, ProviderResponse, StopReason, StreamOptions, TranscriptContext, Transport,
     Usage,
 };
@@ -55,9 +43,11 @@ use crate::utils::diagnostics::{
 };
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::headers_to_record;
-use crate::utils::http::{HeaderList, client_for};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::{BoxWsConnection, WsCloseFrame, WsConnectRequest, WsMessage, WsTransport};
+use crate::transport::{HttpRequest, HttpResponse, HttpTransport};
+use crate::utils::http::HeaderList;
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
-use crate::utils::node_http_proxy::get_proxy_url_for_target;
 use crate::utils::text::get_system_message_text;
 use crate::utils::transcript::{
     get_declared_tools, get_initial_system_message, resolve_transcript, resolve_transcript_tools,
@@ -694,6 +684,24 @@ fn extract_codex_event_error(event: &Value) -> (Option<String>, Option<String>) 
     (code, message)
 }
 
+/// pi-rs divergence (CX-13): the friendly usage-limit text for an `error` event with code
+/// `usage_limit_reached`, built by the same formatter as an HTTP error body
+/// ([`parse_error_response`]). TypeScript builds it only on the HTTP path, so the default
+/// WebSocket transport showed the terse `Codex error: <message>` without plan or reset time.
+fn websocket_usage_limit_message(event: &Value, code: Option<&str>) -> Option<String> {
+    const USAGE_LIMIT_REACHED: &str = "usage_limit_reached";
+    // The fields sit in a nested `error` object or, in the flat form, on the event itself; the
+    // backend names the kind in `error.code` or, like the HTTP body, in `error.type`.
+    let nested = event.get("error").filter(|e| e.is_object());
+    let nested_type = nested.and_then(|e| e.get("type")).and_then(Value::as_str);
+    if code != Some(USAGE_LIMIT_REACHED) && nested_type != Some(USAGE_LIMIT_REACHED) {
+        return None;
+    }
+    let error = nested.cloned().unwrap_or_else(|| event.clone());
+    let raw = json!({ "error": error }).to_string();
+    parse_error_response(0, "", &raw).friendly_message
+}
+
 enum MappedEvent {
     /// A normal event for the Responses processor.
     Event(Value),
@@ -715,6 +723,14 @@ fn map_codex_event(event: Value, output: &mut AssistantMessage) -> anyhow::Resul
     match event_type.as_str() {
         "error" => {
             let (code, message) = extract_codex_event_error(&event);
+            if let Some(friendly) = websocket_usage_limit_message(&event, code.as_deref()) {
+                return Err(CodexApiError {
+                    message: friendly,
+                    code,
+                    payload: Some(event),
+                }
+                .into());
+            }
             let detail = message
                 .filter(|m| !m.is_empty())
                 .or_else(|| code.clone().filter(|c| !c.is_empty()))
@@ -883,9 +899,11 @@ impl CodexSseDecoder {
             self.buffer.push_str("\n\n");
         }
         let mut events = Vec::new();
-        while let Some(idx) = self.buffer.find("\n\n") {
-            let chunk = self.buffer[..idx].to_string();
-            self.buffer = self.buffer[idx + 2..].to_string();
+        // Frames are read in place and the consumed prefix is dropped once per chunk.
+        let mut start = 0;
+        while let Some(offset) = self.buffer[start..].find("\n\n") {
+            let chunk = &self.buffer[start..start + offset];
+            start += offset + 2;
             let data_lines: Vec<&str> = chunk
                 .split('\n')
                 .filter(|l| l.starts_with("data:"))
@@ -910,18 +928,19 @@ impl CodexSseDecoder {
                 }
             }
         }
+        self.buffer.drain(..start);
         Ok(events)
     }
 }
 
 async fn process_sse_stream(
-    response: reqwest::Response,
+    response: HttpResponse,
     output: &mut AssistantMessage,
     sender: &AssistantMessageEventSender,
     pipeline: &mut CodexEventPipeline<'_>,
     signal: Option<&CancellationToken>,
 ) -> anyhow::Result<()> {
-    let mut body = response.bytes_stream();
+    let mut body = response.body;
     let mut decoder = CodexSseDecoder::default();
     'outer: loop {
         if signal.is_some_and(|s| s.is_cancelled()) {
@@ -970,12 +989,7 @@ fn compress_request_body_zstd(body_json: &str) -> Vec<u8> {
 // ============================================================================
 
 #[cfg(not(target_arch = "wasm32"))]
-trait AsyncIo: AsyncRead + AsyncWrite + Send + Unpin {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: AsyncRead + AsyncWrite + Send + Unpin> AsyncIo for T {}
-
-#[cfg(not(target_arch = "wasm32"))]
-type WsStream = WebSocketStream<MaybeTlsStream<Box<dyn AsyncIo>>>;
+type WsStream = BoxWsConnection;
 
 /// WebSocket transport statistics for one session (`OpenAICodexWebSocketDebugStats`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1066,11 +1080,8 @@ fn close_websocket_silently(socket: WsStream, code: u16, reason: &str) {
     let reason = reason.to_string();
     let close = async move {
         let mut socket = socket;
-        let frame = CloseFrame {
-            code: CloseCode::from(code),
-            reason: reason.into(),
-        };
-        let _ = crate::utils::wasm::timeout(Duration::from_secs(5), socket.close(Some(frame))).await;
+        let frame = WsCloseFrame { code, reason };
+        let _ = crate::utils::wasm::timeout(Duration::from_secs(5), socket.send(WsMessage::Close(Some(frame)))).await;
     };
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(close);
@@ -1182,26 +1193,8 @@ fn remove_cached_entry(session_id: &str, account_id: &str, entry: &CachedEntry) 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn websocket_error_message(error: &tokio_tungstenite::tungstenite::Error) -> String {
-    use tokio_tungstenite::tungstenite::Error;
-    match error {
-        Error::Http(response) => {
-            format!("Unexpected server response: {}", response.status().as_u16())
-        }
-        other => {
-            let text = other.to_string();
-            if text.is_empty() {
-                "WebSocket error".to_string()
-            } else {
-                text
-            }
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn close_error(frame: Option<&CloseFrame>) -> WebSocketCloseError {
-    let code = frame.map(|f| u16::from(f.code));
+fn close_error(frame: Option<&WsCloseFrame>) -> WebSocketCloseError {
+    let code = frame.map(|f| f.code);
     let reason = frame
         .map(|f| f.reason.to_string())
         .filter(|r| !r.is_empty());
@@ -1220,99 +1213,18 @@ fn close_error(frame: Option<&CloseFrame>) -> WebSocketCloseError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Open a TCP connection to `host:port`, tunneling through an HTTP proxy when configured.
-async fn open_tcp(
-    target_url: &url::Url,
-    env: Option<&ProviderEnv>,
-) -> anyhow::Result<Box<dyn AsyncIo>> {
-    let host = target_url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid WebSocket URL"))?
-        .to_string();
-    let port = target_url.port_or_known_default().unwrap_or(443);
-    let http_target = target_url
-        .as_str()
-        .replacen("wss:", "https:", 1)
-        .replacen("ws:", "http:", 1);
-    if let Some(proxy) =
-        get_proxy_url_for_target(&http_target, env).and_then(|p| url::Url::parse(&p).ok())
-        && matches!(proxy.scheme(), "http" | "https")
-    {
-        let proxy_host = proxy.host_str().unwrap_or_default().to_string();
-        let proxy_port = proxy.port_or_known_default().unwrap_or(80);
-        let mut stream = tokio::net::TcpStream::connect((proxy_host.as_str(), proxy_port)).await?;
-        let host_port = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-        let mut request = format!("CONNECT {host_port} HTTP/1.1\r\nHost: {host_port}\r\n");
-        if !proxy.username().is_empty() {
-            let user = percent_decode(proxy.username());
-            let pass = percent_decode(proxy.password().unwrap_or_default());
-            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-            request.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
-        }
-        request.push_str("\r\n");
-        stream.write_all(request.as_bytes()).await?;
-        let mut response = Vec::new();
-        let mut byte = [0u8; 1];
-        while !response.ends_with(b"\r\n\r\n") {
-            if stream.read(&mut byte).await? == 0 {
-                anyhow::bail!("Proxy closed the connection during CONNECT");
-            }
-            response.push(byte[0]);
-            if response.len() > 64 * 1024 {
-                anyhow::bail!("Proxy CONNECT response too large");
-            }
-        }
-        let head = String::from_utf8_lossy(&response);
-        let status = head.split_whitespace().nth(1).unwrap_or_default();
-        if status != "200" {
-            anyhow::bail!(
-                "Proxy CONNECT failed: {}",
-                head.lines().next().unwrap_or_default()
-            );
-        }
-        return Ok(Box::new(stream));
-    }
-    let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-    let _ = stream.set_nodelay(true);
-    Ok(Box::new(stream))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn percent_decode(value: &str) -> String {
-    url::form_urlencoded::parse(format!("x={value}").as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| value.to_string())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(
     url: &str,
     headers: &HeaderList,
     signal: Option<&CancellationToken>,
     connect_timeout_ms: u64,
-    env: Option<&ProviderEnv>,
+    transport: &dyn WsTransport,
 ) -> anyhow::Result<WsStream> {
-    let connect = async {
-        let parsed = url::Url::parse(url)?;
-        let mut request = url.into_client_request()?;
-        for (name, value) in headers.entries() {
-            let name = reqwest::header::HeaderName::from_bytes(name.to_lowercase().as_bytes())?;
-            request
-                .headers_mut()
-                .insert(name, reqwest::header::HeaderValue::from_str(value)?);
-        }
-        let stream = open_tcp(&parsed, env).await?;
-        let (socket, _) =
-            tokio_tungstenite::client_async_tls_with_config(request, stream, None, None)
-                .await
-                .map_err(|e| anyhow::anyhow!(websocket_error_message(&e)))?;
-        Ok::<WsStream, anyhow::Error>(socket)
-    };
+    let connect = transport.connect(WsConnectRequest {
+        url: url.to_string(),
+        headers: headers.entries().to_vec(),
+        signal: signal.cloned(),
+    });
     let timeout = async {
         if connect_timeout_ms > 0 {
             crate::utils::wasm::sleep(Duration::from_millis(connect_timeout_ms)).await;
@@ -1392,10 +1304,10 @@ async fn acquire_websocket(
     account_id: &str,
     signal: Option<&CancellationToken>,
     connect_timeout_ms: u64,
-    env: Option<&ProviderEnv>,
+    transport: &dyn WsTransport,
 ) -> anyhow::Result<AcquiredSocket> {
     let Some(session_id) = session_id else {
-        let socket = connect_websocket(url, headers, signal, connect_timeout_ms, env).await?;
+        let socket = connect_websocket(url, headers, signal, connect_timeout_ms, transport).await?;
         return Ok(AcquiredSocket {
             socket,
             entry: None,
@@ -1449,7 +1361,7 @@ async fn acquire_websocket(
             }
         }
         if connect_one_shot {
-            let socket = connect_websocket(url, headers, signal, connect_timeout_ms, env).await?;
+            let socket = connect_websocket(url, headers, signal, connect_timeout_ms, transport).await?;
             return Ok(AcquiredSocket {
                 socket,
                 entry: None,
@@ -1459,7 +1371,7 @@ async fn acquire_websocket(
         }
     }
 
-    let socket = connect_websocket(url, headers, signal, connect_timeout_ms, env).await?;
+    let socket = connect_websocket(url, headers, signal, connect_timeout_ms, transport).await?;
     let entry: CachedEntry = Arc::new(Mutex::new(CachedConnection {
         socket: None,
         busy: true,
@@ -1548,7 +1460,7 @@ fn build_cached_websocket_request_body(entry: &CachedEntry, body: &Value) -> Val
 /// Read one parsed message from the socket, honoring abort and idle timeout.
 enum SocketRead {
     Event(Value),
-    Closed(Option<CloseFrame>),
+    Closed(Option<WsCloseFrame>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1581,9 +1493,9 @@ async fn read_websocket_event(
         };
         let text = match message {
             None => return Ok(SocketRead::Closed(None)),
-            Some(Err(error)) => return Err(anyhow::anyhow!(websocket_error_message(&error))),
+            Some(Err(error)) => return Err(anyhow::anyhow!(error.message)),
             Some(Ok(WsMessage::Close(frame))) => return Ok(SocketRead::Closed(frame)),
-            Some(Ok(WsMessage::Text(text))) => text.to_string(),
+            Some(Ok(WsMessage::Text(text))) => text,
             Some(Ok(WsMessage::Binary(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
             Some(Ok(_)) => continue,
         };
@@ -1626,7 +1538,7 @@ async fn process_websocket_stream(
         account_id,
         signal,
         connect_timeout_ms,
-        options.env.as_ref(),
+        &*crate::transport::ws_transport_for(options),
     )
     .await?;
     let transport = options.transport.unwrap_or(Transport::Auto);
@@ -1692,9 +1604,9 @@ async fn process_websocket_stream(
         }
         acquired
             .socket
-            .send(WsMessage::text(Value::Object(frame).to_string()))
+            .send(WsMessage::Text(Value::Object(frame).to_string()))
             .await
-            .map_err(|e| anyhow::anyhow!(websocket_error_message(&e)))?;
+            .map_err(|e| anyhow::anyhow!(e.message))?;
         let mut pipeline = CodexEventPipeline::new(model, options, grammar, &apply);
         let mut started = false;
         loop {
@@ -1775,18 +1687,21 @@ async fn process_websocket_stream(
 // ============================================================================
 
 async fn send_sse_request(
-    client: &reqwest::Client,
+    client: &dyn HttpTransport,
     url: &str,
     headers: &HeaderList,
     body: &[u8],
     http_timeout_ms: Option<u64>,
     signal: Option<&CancellationToken>,
-) -> anyhow::Result<reqwest::Response> {
-    let request = client
-        .post(url)
-        .headers(headers.to_header_map()?)
-        .body(body.to_vec())
-        .send();
+) -> anyhow::Result<HttpResponse> {
+    // Validates every header line before anything is sent.
+    headers.to_header_map()?;
+    let request = client.send(
+        HttpRequest::post(url)
+            .headers(headers.entries().iter().cloned())
+            .body(body.to_vec())
+            .signal(signal.cloned()),
+    );
     let timeout = async {
         match http_timeout_ms.filter(|t| *t > 0) {
             Some(ms) => crate::utils::wasm::sleep(Duration::from_millis(ms)).await,
@@ -2008,21 +1923,18 @@ async fn run_stream(
         let sse_body = compress_request_body_zstd(&body_json);
         sse_headers.set("content-encoding", Some("zstd"));
         let url = resolve_codex_url(Some(&model.base_url));
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = crate::transport::http_transport_for(&url, &options)?;
         let max_retries = options.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
-        let mut response: Option<reqwest::Response> = None;
+        let mut response: Option<HttpResponse> = None;
         let mut last_error: Option<anyhow::Error> = None;
         let mut attempt: u32 = 0;
         while attempt <= max_retries {
             if aborted() {
                 return Err(aborted_error());
             }
-            let outcome: anyhow::Result<Option<reqwest::Response>> = async {
+            let outcome: anyhow::Result<Option<HttpResponse>> = async {
                 let resp = send_sse_request(
-                    &client,
+                    &*client,
                     &url,
                     &sse_headers,
                     &sse_body,
@@ -2033,20 +1945,21 @@ async fn run_stream(
                 if let Some(on_response) = &options.on_response {
                     on_response(
                         ProviderResponse {
-                            status: resp.status().as_u16(),
-                            headers: headers_to_record(resp.headers()),
+                            status: resp.status,
+                            headers: headers_to_record(&resp.headers),
                         },
                         model.clone(),
                     )
                     .await;
                 }
-                if resp.status().is_success() {
+                if resp.is_success() {
                     return Ok(Some(resp));
                 }
-                let status = resp.status();
-                let resp_headers = resp.headers().clone();
+                let status = resp.status;
+                let status_text = resp.status_text.clone();
+                let resp_headers = resp.headers.clone();
                 let error_text = resp.text().await.unwrap_or_default();
-                if attempt < max_retries && is_retryable_error(status.as_u16(), &error_text) {
+                if attempt < max_retries && is_retryable_error(status, &error_text) {
                     let delay = match get_retry_after_delay_ms(&resp_headers) {
                         None => (BASE_DELAY_MS * 2u64.pow(attempt)) as f64,
                         Some(delay) => validate_retry_delay_ms(delay, &options)?,
@@ -2054,11 +1967,7 @@ async fn run_stream(
                     sleep(delay, signal.as_ref()).await?;
                     return Ok(None);
                 }
-                let info = parse_error_response(
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or_default(),
-                    &error_text,
-                );
+                let info = parse_error_response(status, &status_text, &error_text);
                 anyhow::bail!("{}", info.friendly_message.unwrap_or(info.message))
             }
             .await;

@@ -68,7 +68,9 @@ fn options(proxy_url: String) -> ProxyStreamOptions {
     ProxyStreamOptions {
         auth_token: "test-token".into(),
         proxy_url,
-        http_client: Some(reqwest::Client::builder().no_proxy().build().unwrap()),
+        http_transport: Some(std::sync::Arc::new(pi_ai::transport::ReqwestTransport::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        ))),
         ..Default::default()
     }
 }
@@ -227,4 +229,96 @@ async fn skips_unknown_proxy_event_types_like_typescript() {
         vec!["start", "done"]
     );
     assert_eq!(result.stop_reason, StopReason::Stop);
+}
+
+/// #9265: a large streamed tool call shows growing partial arguments, keeps no raw text on the
+/// block, and parses in linear time (re-parsing the accumulated arguments on every delta took
+/// minutes for this input).
+#[tokio::test]
+async fn shows_growing_partial_arguments_without_keeping_the_raw_text_in_linear_time() {
+    let content = "line \"quoted\" \\ end\n".repeat(20_000);
+    let text = json!({"path": "a.ts", "content": content}).to_string();
+    let mut proxy_events = vec![
+        ProxyAssistantMessageEvent::Start,
+        ProxyAssistantMessageEvent::ToolCallStart {
+            content_index: 0,
+            id: "call_1".into(),
+            tool_name: "write".into(),
+        },
+    ];
+    for piece in text.as_bytes().chunks(32) {
+        proxy_events.push(ProxyAssistantMessageEvent::ToolCallDelta {
+            content_index: 0,
+            delta: String::from_utf8(piece.to_vec()).unwrap(),
+        });
+    }
+    proxy_events.push(ProxyAssistantMessageEvent::ToolCallEnd {
+        content_index: 0,
+        tool_call: ToolCall {
+            id: "call_1".into(),
+            name: "write".into(),
+            arguments: json!({"path": "a.ts", "content": content})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        },
+    });
+    proxy_events.push(ProxyAssistantMessageEvent::Done {
+        reason: StopReason::ToolUse,
+        usage: Usage::default(),
+        provider_thinking_level: None,
+    });
+    let body: String = proxy_events
+        .iter()
+        .map(|event| format!("data: {}\n\n", serde_json::to_string(event).unwrap()))
+        .collect();
+    let url = serve("200 OK", body).await;
+
+    let started = std::time::Instant::now();
+    let mut stream = stream_proxy(model(), transcript_from_messages(vec![]), options(url));
+    let mut shown = 0;
+    let mut deltas = 0;
+    while let Some(event) = stream.next_event().await {
+        let AssistantMessageEvent::ToolCallDelta { partial, .. } = event else {
+            continue;
+        };
+        let AssistantContent::ToolCall(call) = &partial.content[0] else {
+            panic!("a tool call")
+        };
+        let keys: Vec<&String> = call.arguments.keys().collect();
+        assert!(
+            keys.iter().all(|key| *key == "path" || *key == "content"),
+            "no stream state on the block: {keys:?}"
+        );
+        let Some(partial_content) = call.arguments.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Comparing the whole text on every delta would make this test itself quadratic.
+        if deltas % 500 == 0 {
+            assert!(content.starts_with(partial_content));
+        }
+        deltas += 1;
+        assert!(
+            partial_content.len() >= shown,
+            "partial arguments only grow"
+        );
+        shown = partial_content.len();
+    }
+    let result = stream.result().await;
+    assert!(shown > 0, "partial arguments were shown while streaming");
+    match &result.content[0] {
+        AssistantContent::ToolCall(call) => {
+            assert_eq!(
+                serde_json::Value::Object(call.arguments.clone()),
+                json!({"path": "a.ts", "content": content})
+            );
+        }
+        other => panic!("unexpected content {other:?}"),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
 }

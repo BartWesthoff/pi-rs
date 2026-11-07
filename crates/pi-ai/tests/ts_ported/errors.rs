@@ -314,6 +314,12 @@ fn context_overflow_detection() {
             "ollama",
             131072,
         ),
+        // LiteLLM pre-call ContextWindowExceededError (#11494).
+        (
+            "400: {\"message\":\"litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.\nModel=Qwen3.8-Flash-Next, Max Input Tokens=262144, Got=265262\nmodel=Qwen3.8-Flash-Next. context_window_fallbacks=None. fallbacks=[].\"}",
+            "ollama",
+            262144,
+        ),
         ("Error: 400 Input length (265330) exceeds model's maximum context length (262144).", "ollama", 262144),
         ("Provider returned error: Input length 131393 exceeds the maximum allowed input length of 131040 tokens.", "ollama", 131072),
         ("400 Prompt has 256468 tokens, but the configured context size is 256000 tokens", "ollama", 256000),

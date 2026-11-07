@@ -18,8 +18,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +29,7 @@ use super::constrained_sampling::{get_json_schema_tool_parameters, resolve_json_
 use super::simple_options::{adjust_max_tokens_for_thinking, build_base_options, clamp_max_tokens_to_context, clamp_reasoning};
 use super::transform_messages::{split_error_tool_result_images, transform_messages};
 use crate::models::{ProviderStreams, calculate_cost};
+use crate::transport::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
 use crate::types::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, CacheRetention, Message, Model, ModelThinkingLevel,
     ProviderEnv, ProviderResponse, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
@@ -40,7 +40,7 @@ use crate::utils::error_body::{MAX_PROVIDER_ERROR_BODY_CHARS, truncate_error_tex
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record};
 use crate::utils::identity::{ClientIdentity, UserAgentMode, UserAgentNamed, get_client_version};
-use crate::utils::json_parse::{parse_streaming_json_object, parse_tool_call_arguments};
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use crate::utils::provider_env::get_provider_env_value;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 use crate::utils::text::{get_system_message_text, get_system_message_text_is_empty};
@@ -799,7 +799,7 @@ pub(crate) const TRANSIENT_CODES: [&str; 4] = ["TimeoutError", "RequestTimeout",
 pub(crate) const TRANSIENT_STATUSES: [u16; 4] = [500, 502, 503, 504];
 
 enum Attempt {
-    Ok(reqwest::Response),
+    Ok(HttpResponse),
     /// `retry_after`: the response's retry-after hint (epoch ms).
     Failed { error: anyhow::Error, retryable: bool, throttling: bool, retry_after: Option<i64> },
 }
@@ -839,7 +839,7 @@ struct PreparedRequest {
 }
 
 async fn attempt_request(
-    client: &reqwest::Client,
+    client: &dyn HttpTransport,
     prepared: &PreparedRequest,
     attempt: u32,
     max: u32,
@@ -862,14 +862,14 @@ async fn attempt_request(
             headers.extend(signed);
         }
     }
-    let mut request = client.post(prepared.url.clone()).body(prepared.body.clone());
+    let mut request = HttpRequest::post(prepared.url.as_str()).body(prepared.body.clone()).signal(signal.cloned());
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("host") {
             continue;
         }
         request = request.header(name.as_str(), value.as_str());
     }
-    let send = request.send();
+    let send = client.send(request);
     let result = match signal {
         Some(signal) => tokio::select! {
             r = send => r,
@@ -886,16 +886,16 @@ async fn attempt_request(
             let message = if error.is_timeout() {
                 format!("Connection timed out: {error}")
             } else {
-                crate::utils::http::NetworkError::from_reqwest(&error).to_string()
+                error.network_error().to_string()
             };
             return Attempt::Failed { error: anyhow::anyhow!(message), retryable: true, throttling: false, retry_after: None };
         }
     };
-    let status = response.status().as_u16();
+    let status = response.status;
     if (200..300).contains(&status) {
         return Attempt::Ok(response);
     }
-    let headers = response.headers().clone();
+    let headers = response.headers.clone();
     let retry_after = super::aws_credentials::retry_after_hint(&headers);
     let body = response.text().await.unwrap_or_default();
     let error = parse_service_error(status, &headers, &body);
@@ -914,13 +914,13 @@ enum RequestAuth {
 }
 
 async fn send_with_retries(
-    client: &reqwest::Client,
+    client: &dyn HttpTransport,
     prepared: &PreparedRequest,
     auth: &RequestAuth,
     region: &str,
     profile: Option<&str>,
     signal: Option<&CancellationToken>,
-) -> anyhow::Result<reqwest::Response> {
+) -> anyhow::Result<HttpResponse> {
     let max = super::aws_credentials::aws_max_attempts_for(profile)?;
     let mut quota = super::aws_credentials::SdkRetryQuota::new();
     let mut attempt = 1;
@@ -950,7 +950,7 @@ async fn send_with_retries(
     }
 }
 
-type ByteStream = std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+type ByteStream = crate::transport::ResponseBody;
 
 /// Reads `ConverseStreamOutput` union members (`{ messageStart: {...} }`, ...) from an event
 /// stream body.
@@ -1033,7 +1033,7 @@ impl ConverseEventReader {
 struct BlockState {
     /// Bedrock `contentBlockIndex` per output block (`None` once stopped).
     index: Vec<Option<i64>>,
-    partial_json: std::collections::HashMap<usize, String>,
+    partial_json: std::collections::HashMap<usize, ToolCallArgumentsStream>,
     redacted_chunks: std::collections::HashMap<usize, Vec<u8>>,
 }
 
@@ -1083,7 +1083,7 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
                 ..Default::default()
             }));
             state.index.push(index);
-            state.partial_json.insert(output.content.len() - 1, String::new());
+            state.partial_json.insert(output.content.len() - 1, ToolCallArgumentsStream::new());
             sender.push(AssistantMessageEvent::ToolCallStart { content_index: output.content.len() - 1, partial: output.clone() });
         }
     } else if let Some(event) = item.get("contentBlockDelta") {
@@ -1105,10 +1105,10 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
         } else if let (Some(tool_use), Some(position)) = (delta.get("toolUse"), position) {
             if matches!(output.content.get(position), Some(AssistantContent::ToolCall(_))) {
                 let input = tool_use.get("input").and_then(Value::as_str).unwrap_or_default().to_string();
-                let partial = state.partial_json.entry(position).or_default();
-                partial.push_str(&input);
-                let parsed = parse_streaming_json_object(Some(partial));
-                if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position) {
+                // Take the block mutably only when the partial arguments changed.
+                if let Some(parsed) = state.partial_json.entry(position).or_default().append(&input)
+                    && let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(position)
+                {
                     block.arguments = parsed;
                 }
                 sender.push(AssistantMessageEvent::ToolCallDelta { content_index: position, delta: input, partial: output.clone() });
@@ -1183,8 +1183,7 @@ fn handle_item(item: &Value, model: &Model, output: &mut AssistantMessage, sende
                 sender.push(AssistantMessageEvent::ThinkingEnd { content_index: position, content, partial: output.clone() });
             }
             Some(AssistantContent::ToolCall(block)) => {
-                let partial = state.partial_json.remove(&position).unwrap_or_default();
-                let parsed = parse_tool_call_arguments(Some(&partial));
+                let parsed = state.partial_json.remove(&position).unwrap_or_default().finish();
                 block.arguments = parsed.arguments;
                 block.arguments_error = parsed.arguments_error;
                 let tool_call = block.clone();
@@ -1318,13 +1317,16 @@ async fn run_stream(model: Model, context: TranscriptContext, options: StreamOpt
             }
         }
         let prepared = PreparedRequest { url, headers, body: serde_json::to_vec(&command_body(&input))? };
-        let response = send_with_retries(&client, &prepared, &auth, &region, config.profile.as_deref(), options.signal.as_ref()).await?;
-        response_request_id = normalize_diagnostic_value(response.headers().get("x-amzn-requestid").and_then(|v| v.to_str().ok()));
+        // The SDK sends through its own Node HTTP handler, not `fetch`, so a custom
+        // `http_transport` does not apply; the request still goes through the transport seam.
+        let transport = ReqwestTransport::new(client.clone());
+        let response = send_with_retries(&transport, &prepared, &auth, &region, config.profile.as_deref(), options.signal.as_ref()).await?;
+        response_request_id = normalize_diagnostic_value(response.headers.get("x-amzn-requestid").and_then(|v| v.to_str().ok()));
         if let Some(on_response) = &options.on_response {
-            on_response(ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) }, model.clone()).await;
+            on_response(ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) }, model.clone()).await;
         }
         let mut reader = ConverseEventReader {
-            body: Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())),
+            body: response.body,
             decoder: EventStreamDecoder::new(),
             queue: Default::default(),
             done: false,

@@ -764,6 +764,47 @@ fn capturing_overlay_unfocus_on_topmost_capturing_overlay_falls_back_to_pre_focu
     assert!(!capturing.is_focused());
 }
 
+// ---- topmost visible overlay --------------------------------------------------------------
+
+#[test]
+fn topmost_visible_overlay_is_none_without_overlays() {
+    let s = Setup::new(20, 6, None, None);
+    assert!(s.tui().get_topmost_visible_overlay().is_none());
+}
+
+#[test]
+fn topmost_visible_overlay_skips_hidden_non_capturing_and_invisible_overlays() {
+    let s = Setup::new(20, 6, None, None);
+    let invisible_flag = Arc::new(AtomicBool::new(false));
+    let capturing = static_overlay("CAPTURING");
+    s.show(static_overlay("NON-CAPTURING"), non_capturing());
+    s.show(static_overlay("INVISIBLE"), visible_when(&invisible_flag));
+    s.show(capturing.clone(), None);
+    let hidden = s.show(static_overlay("HIDDEN"), None);
+    hidden.set_hidden(true);
+    s.flush();
+    let topmost = s.tui().get_topmost_visible_overlay().expect("a visible capturing overlay");
+    assert!(std::sync::Arc::ptr_eq(&topmost.component, &capturing));
+}
+
+#[test]
+fn topmost_visible_overlay_follows_focus_order() {
+    let s = Setup::new(20, 6, None, None);
+    let lower = static_overlay("LOWER");
+    let lower_handle = s.show(lower.clone(), None);
+    s.show(static_overlay("UPPER"), None);
+    s.flush();
+    assert!(!std::sync::Arc::ptr_eq(
+        &s.tui().get_topmost_visible_overlay().expect("topmost").component,
+        &lower
+    ));
+    lower_handle.focus();
+    s.flush();
+    let topmost = s.tui().get_topmost_visible_overlay().expect("topmost");
+    assert!(std::sync::Arc::ptr_eq(&topmost.component, &lower));
+    assert!(topmost.focus_order > 0);
+}
+
 // ---- no-op guards -------------------------------------------------------------------------
 
 #[test]

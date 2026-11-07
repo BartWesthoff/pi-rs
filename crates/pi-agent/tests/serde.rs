@@ -1,7 +1,7 @@
 //! JSON compatibility of agent messages and events.
 
 use pi_agent::{AgentEvent, AgentMessage, AgentToolResult, CustomMessage};
-use pi_ai::UserContentBlock;
+use pi_ai::{ToolResultMessage, UserContentBlock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -86,6 +86,31 @@ fn events_use_typescript_shapes() {
         serde_json::to_value(&event).unwrap(),
         json!({ "type": "turn_end", "message": { "role": "custom", "timestamp": 1 }, "toolResults": [] })
     );
+    // TS tool result messages keep their `role` discriminant in `turn_end`.
+    let event = AgentEvent::TurnEnd {
+        message: AgentMessage::from_value(json!({ "role": "custom", "timestamp": 1 })).unwrap(),
+        tool_results: vec![ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            content: vec![UserContentBlock::text("ok")],
+            timestamp: 2,
+            ..Default::default()
+        }],
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        value["toolResults"],
+        json!([{ "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": [{ "type": "text", "text": "ok" }], "isError": false, "timestamp": 2 }])
+    );
+    assert!(
+        serde_json::to_string(&value["toolResults"][0])
+            .unwrap()
+            .starts_with(r#"{"role":"toolResult","toolCallId":"c1""#)
+    );
+    let AgentEvent::TurnEnd { tool_results, .. } = serde_json::from_value(value).unwrap() else {
+        panic!("turn_end round trip")
+    };
+    assert_eq!(tool_results[0].tool_call_id, "c1");
     assert_eq!(
         serde_json::to_value(AgentEvent::AgentStart).unwrap(),
         json!({ "type": "agent_start" })

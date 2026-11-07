@@ -4,7 +4,6 @@
 //! radius-thinking-replay-e2e.test.ts and xiaomi-token-plan-ams-anthropic-empty-signature-smoke.test.ts.
 
 use pi_ai::compat::{complete_simple, stream, stream_simple};
-use pi_ai::*;
 use regex::Regex;
 use serde_json::{Value, json};
 

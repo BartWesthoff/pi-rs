@@ -78,8 +78,10 @@ fn retry_classification() {
         "The service is temporarily unavailable. Please retry later.",
         "Service unavailable: The service is temporarily unavailable.",
         "request to https://oauth2.googleapis.com/token failed, reason:",
+        "request to https://oauth2.googleapis.com/token failed, reason: connect ECONNREFUSED 127.0.0.1:9",
         "unknown: Unable to forward upstream stream",
         "upstream_error: Upstream request failed",
+        "upstream_stream_read_error: Upstream response stream was interrupted",
         "Upstream HTTP/2 stream failed",
         "OpenAI Responses stream ended before a terminal response event",
         "The system is currently experiencing high demand and cannot process your request.",
@@ -99,6 +101,26 @@ fn retry_classification() {
         assert!(!is_retryable_assistant_error(&error_message(non_retryable)), "{non_retryable}");
     }
     assert!(!is_retryable_assistant_error(&faux_text_message("not an error")));
+}
+
+#[test]
+fn chatgpt_business_workspace_usage_limit_stays_non_retryable() {
+    let message = r#"OpenAI API error (429): {"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"Usage limit reached."}"#;
+    assert!(!is_retryable_assistant_error(&error_message(message)));
+}
+
+// Zhipu/Z.ai usage limit (code 1308) is sent as HTTP 429 but resets after hours (#11572).
+#[test]
+fn zhipu_usage_limit_code_1308_is_not_retried() {
+    for message in [
+        r#"429 {"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-01-01 12:00:00"}}"#,
+        r#"zai API error (429): {"code": 1308, "message": "usage limit"}"#,
+    ] {
+        assert!(!is_retryable_assistant_error(&error_message(message)), "{message}");
+    }
+    // Only the exact code: a longer number stays a plain retryable 429.
+    let message = r#"429 {"error":{"code":"13080","message":"rate limit"}}"#;
+    assert!(is_retryable_assistant_error(&error_message(message)), "{message}");
 }
 
 #[test]
@@ -252,7 +274,7 @@ fn overflow_detection() {
 
 fn assistant(provider: &str, api: &str, model: &str, content: Vec<AssistantContent>, stop: StopReason) -> Message {
     Message::Assistant(AssistantMessage {
-        content,
+        content: content.into(),
         api: api.into(),
         provider: provider.into(),
         model: model.into(),

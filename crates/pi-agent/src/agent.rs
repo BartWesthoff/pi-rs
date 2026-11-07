@@ -971,7 +971,7 @@ async fn handle_run_failure(
 ) {
     let model = inner.state.lock().model.clone();
     let failure_message = AgentMessage::Assistant(AssistantMessage {
-        content: vec![AssistantContent::Text(TextContent::new(""))],
+        content: vec![AssistantContent::Text(TextContent::new(""))].into(),
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),

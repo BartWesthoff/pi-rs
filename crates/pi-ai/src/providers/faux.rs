@@ -1,5 +1,6 @@
 //! Faux (scripted) provider for tests (port of `providers/faux.ts`).
 
+use crate::utils::streaming_json::ToolCallArgumentsStream;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,7 +74,7 @@ pub struct FauxMessageOptions {
 /// Build a scripted assistant message.
 pub fn faux_assistant_message(content: Vec<AssistantContent>, options: FauxMessageOptions) -> AssistantMessage {
     AssistantMessage {
-        content,
+        content: content.into(),
         api: DEFAULT_API.to_string(),
         provider: DEFAULT_PROVIDER.to_string(),
         model: DEFAULT_MODEL_ID.to_string(),
@@ -376,7 +377,7 @@ async fn stream_with_deltas(
     tokens_per_second: Option<f64>,
     signal: Option<CancellationToken>,
 ) -> anyhow::Result<()> {
-    let mut partial = AssistantMessage { content: Vec::new(), stop_reason: StopReason::Pending, ..message.clone() };
+    let mut partial = AssistantMessage { content: Vec::new().into(), stop_reason: StopReason::Pending, ..message.clone() };
     if is_aborted(&signal) {
         abort(stream, &partial);
         return Ok(());
@@ -442,11 +443,19 @@ async fn stream_with_deltas(
                 }));
                 stream.push(AssistantMessageEvent::ToolCallStart { content_index: index, partial: partial.clone() });
                 let json = serde_json::to_string(&call.arguments).unwrap_or_default();
+                // Partial arguments come from the same parser real providers use, so consumers see
+                // them grow.
+                let mut tool_arguments = ToolCallArgumentsStream::new();
                 for chunk in split_string_by_token_size(&json, min_token_size, max_token_size) {
                     schedule_chunk(&chunk, tokens_per_second).await;
                     if is_aborted(&signal) {
                         abort(stream, &partial);
                         return Ok(());
+                    }
+                    if let Some(arguments) = tool_arguments.append(&chunk)
+                        && let Some(AssistantContent::ToolCall(c)) = partial.content.get_mut(index)
+                    {
+                        c.arguments = arguments;
                     }
                     stream.push(AssistantMessageEvent::ToolCallDelta {
                         content_index: index,

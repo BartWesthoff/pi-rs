@@ -1,0 +1,29 @@
+{
+  "packages": [
+    {
+      "source": "git:github.com/DietrichGebert/ponytail",
+      "skills": [
+        "!skills/ponytail-gain/**",
+        "!skills/ponytail-help/**",
+        "!skills/ponytail-debt/**"
+      ]
+    },
+    "npm:pi-mcp-adapter",
+    {
+      "source": "npm:pi-subagents",
+      "skills": [
+        "!skills/council-mode/**"
+      ]
+    },
+    "npm:billion-context",
+    "npm:pi-web-access",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@juicesharp/rpiv-todo",
+    "npm:context-mode"
+  ],
+  "extensions": [
+    "-builtin:mcp",
+    "-builtin:llama.cpp"
+  ],
+  "enableSkillCommands": true
+}

@@ -97,6 +97,8 @@ struct State {
     is_partial: bool,
     execution_started: bool,
     args_complete: bool,
+    /// `update_args()` ran since the last display update; the next render applies it.
+    args_pending: bool,
     result: Option<ToolExecutionComponentUpdateResultResult>,
     hide_component: bool,
 }
@@ -175,6 +177,7 @@ impl ToolExecutionComponent {
                     is_partial: true,
                     execution_started: false,
                     args_complete: false,
+                    args_pending: false,
                     result: None,
                     hide_component: false,
                 }),
@@ -196,9 +199,15 @@ impl ToolExecutionComponent {
         Self { inner }
     }
 
+    /// Show new partial arguments. Applied at the next render, so a call streaming many argument
+    /// deltas between two frames runs its renderer once per frame, not once per delta (#9265).
     pub fn update_args(&self, args: Value) {
-        self.inner.st.lock().args = args;
-        self.inner.update_display();
+        {
+            let mut st = self.inner.st.lock();
+            st.args = args;
+            st.args_pending = true;
+        }
+        self.inner.request_render();
     }
 
     pub fn mark_execution_started(&self) {
@@ -371,6 +380,7 @@ impl Inner {
     fn update_display(&self) {
         let (is_partial, is_error, output_pad, result, show_images, image_width_cells) = {
             let mut st = self.st.lock();
+            st.args_pending = false;
             st.hide_component = false;
             (
                 st.is_partial,
@@ -596,6 +606,10 @@ impl Inner {
 impl Component for ToolExecutionComponent {
     fn render(&self, width: usize) -> Vec<String> {
         let inner = &self.inner;
+        let args_pending = inner.st.lock().args_pending;
+        if args_pending {
+            inner.update_display();
+        }
         let (hide, images, spacers) = {
             let st = inner.st.lock();
             (st.hide_component, st.image_components.clone(), st.image_spacers.clone())

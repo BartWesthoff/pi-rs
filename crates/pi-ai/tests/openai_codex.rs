@@ -298,12 +298,12 @@ async fn session_headers_cache_key_and_overrides() {
 #[tokio::test]
 async fn simple_options_reasoning_and_tool_choice() {
     let server = serve_sequence(vec![Reply::sse(data_sse(&sse_events("completed", None)))]).await;
-    let mut gpt55 = pi_ai::providers::all::get_builtin_model("openai-codex", "gpt-5.5").unwrap();
-    gpt55.base_url = server.base_url.clone();
+    let mut sol = pi_ai::providers::all::get_builtin_model("openai-codex", "gpt-6.1-sol").unwrap();
+    sol.base_url = server.base_url.clone();
     let mut opts = options(&mock_token("a"), Transport::Sse);
     opts.reasoning = Some(ThinkingLevel::Xhigh);
     opts.tool_choice = Some(ToolChoice::None);
-    codex::stream_simple(&gpt55, &context("x"), opts)
+    codex::stream_simple(&sol, &context("x"), opts)
         .result()
         .await;
     let body = server.requests()[0].decoded_json();
@@ -626,6 +626,67 @@ async fn codex_api_errors_do_not_fall_back() {
     .await;
     assert_eq!(message.error_message.as_deref(), Some("Codex error: nope"));
     assert!(server.requests().is_empty());
+}
+
+/// pi-rs divergence (CX-13): a usage-limit `error` frame on the WebSocket reads like the HTTP
+/// path's friendly message (plan and reset time) instead of `Codex error: <message>`.
+#[tokio::test]
+async fn websocket_usage_limit_error_uses_the_friendly_message() {
+    let resets_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 30 * 60;
+    for frame in [
+        // The nested form the backend sends, with the kind in `error.type`.
+        json!({ "type": "error", "status": 429, "error": {
+            "type": "usage_limit_reached", "message": "The usage limit has been reached",
+            "plan_type": "PLUS", "resets_at": resets_at } }),
+        // The flat form, with the kind in `code`.
+        json!({ "type": "error", "code": "usage_limit_reached",
+            "message": "The usage limit has been reached", "plan_type": "PLUS", "resets_at": resets_at }),
+    ] {
+        let ws: WsHandler = Arc::new(move |_, _| ws_events(vec![frame.clone()]));
+        let server = serve_codex(http_fail(), ws, 0).await;
+        let message = codex::stream(
+            &model(&server.base_url),
+            &context("x"),
+            options(&mock_token("a"), Transport::Auto),
+        )
+        .result()
+        .await;
+        assert_eq!(message.stop_reason, StopReason::Error);
+        let text = message.error_message.clone().unwrap_or_default();
+        // ~30 min, give or take the rounding of a second boundary.
+        assert!(
+            text == "You have hit your ChatGPT usage limit (plus plan). Try again in ~30 min."
+                || text == "You have hit your ChatGPT usage limit (plus plan). Try again in ~29 min.",
+            "{text}"
+        );
+        // Still a Codex API error: no SSE fallback, and the agent does not auto-retry it.
+        assert!(server.requests().is_empty());
+        assert!(!pi_ai::utils::retry::is_retryable_assistant_error(&message));
+    }
+
+    // Without plan and reset time the message is the bare sentence, as on the HTTP path.
+    let ws: WsHandler = Arc::new(|_, _| {
+        ws_events(vec![json!({ "type": "error", "error": { "code": "usage_limit_reached", "message": "Limit" } })])
+    });
+    let server = serve_codex(http_fail(), ws, 0).await;
+    let message = codex::stream(&model(&server.base_url), &context("x"), options(&mock_token("a"), Transport::Auto))
+        .result()
+        .await;
+    assert_eq!(message.error_message.as_deref(), Some("You have hit your ChatGPT usage limit."));
+
+    // Other WebSocket rate-limit codes keep the TypeScript text (and stay retryable).
+    let ws: WsHandler = Arc::new(|_, _| {
+        ws_events(vec![json!({ "type": "error", "error": { "code": "rate_limit_exceeded", "message": "Rate limit reached" } })])
+    });
+    let server = serve_codex(http_fail(), ws, 0).await;
+    let message = codex::stream(&model(&server.base_url), &context("x"), options(&mock_token("a"), Transport::Auto))
+        .result()
+        .await;
+    assert_eq!(message.error_message.as_deref(), Some("Codex error: Rate limit reached"));
 }
 
 #[tokio::test]

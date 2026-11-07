@@ -16,7 +16,7 @@ use crate::types::{
 };
 use crate::utils::error_body::{SdkErrorStyle, format_provider_error, normalize_provider_error};
 use crate::utils::headers::{headers_to_record, provider_headers_to_record, to_provider_headers};
-use crate::utils::http::{HeaderList, client_for, post_json, stainless_headers};
+use crate::utils::http::{HeaderList, post_json, stainless_headers};
 use crate::utils::identity::{ClientIdentityTarget, get_identity_headers};
 use crate::utils::provider_retry::{AbortError, ProviderRetryOptions, retry_provider_request};
 use crate::utils::sanitize_unicode::sanitize_surrogates;
@@ -133,10 +133,7 @@ pub async fn generate_images(model: &ImageModel, context: &ImagesContext, option
                 params = next;
             }
         let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
-        let client = match &options.http_client {
-            Some(client) => client.clone(),
-            None => client_for(&url, options.env.as_ref())?,
-        };
+        let client = crate::transport::http_transport_for(&url, &options)?;
         if options.is_aborted() {
             anyhow::bail!(AbortError);
         }
@@ -147,13 +144,13 @@ pub async fn generate_images(model: &ImageModel, context: &ImagesContext, option
             no_retry_statuses: Vec::new(),
         };
         let response = retry_provider_request(
-            || post_json(&client, &url, &headers, &params, Some(timeout_ms), options.signal.as_ref(), SdkErrorStyle::OpenAI),
+            || post_json(&*client, &url, &headers, &params, Some(timeout_ms), options.signal.as_ref(), SdkErrorStyle::OpenAI),
             &retry,
         )
         .await?;
         if let Some(on_response) = &options.on_response {
             on_response(
-                ProviderResponse { status: response.status().as_u16(), headers: headers_to_record(response.headers()) },
+                ProviderResponse { status: response.status, headers: headers_to_record(&response.headers) },
                 image_hook_model(model),
             )
             .await;

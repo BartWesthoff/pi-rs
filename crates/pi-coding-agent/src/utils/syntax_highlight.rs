@@ -147,9 +147,18 @@ pub fn render_highlighted_html(html: &str, theme: Option<&HighlightTheme>) -> St
     output
 }
 
+static HIGHLIGHT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of [`highlight`] calls in this process, for tests that check highlighting is reused.
+#[doc(hidden)]
+pub fn highlight_call_count() -> u64 {
+    HIGHLIGHT_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Highlight `code` (with `options.language`, or auto-detection among `language_subset`) and
 /// render it with `options.theme`. Errors for unknown languages, like highlight.js.
 pub fn highlight(code: &str, options: Option<&HighlightOptions>) -> anyhow::Result<String> {
+    HIGHLIGHT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let default_options = HighlightOptions::default();
     let options = options.unwrap_or(&default_options);
     let html = match options.language.as_deref().filter(|l| !l.is_empty()) {
@@ -165,6 +174,12 @@ pub fn highlight(code: &str, options: Option<&HighlightOptions>) -> anyhow::Resu
 
 pub fn supports_language(name: &str) -> bool {
     engine::get_language(name).is_some()
+}
+
+/// Number of registered grammars. It grows when the deferred grammars load, which can change the
+/// highlighting of code that embeds another language, such as HTML in a JavaScript template literal.
+pub fn get_highlight_language_count() -> usize {
+    engine::language_count()
 }
 
 #[cfg(test)]

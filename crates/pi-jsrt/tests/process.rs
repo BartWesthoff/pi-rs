@@ -315,3 +315,119 @@ async fn process_env_tz_sets_the_runtime_timezone() {
         .unwrap();
     assert_eq!(value, serde_json::json!([[0, 0], [5, -330], 240, [0, 0], "string", ""]));
 }
+
+const HOST_IDENTITY_PROBE: &str = include_str!("fixtures/host_identity/probe.js");
+const HOST_IDENTITY_GOLDEN: &str = include_str!("fixtures/host_identity/golden.tsv");
+/// What pi's extension runtime adds (pi-coding-agent `HostIdentity::COMPILED_PI`).
+const PI_BUN_VERSION: &str = "1.3.14";
+const PI_ENTRY: &str = "/$bunfs/root/pi";
+const PI_BINARY_ENV: &str = "PI_SUBAGENT_PI_BINARY";
+
+/// `(probe, node 22 value, pi extension runtime value)` rows of the golden.
+fn host_identity_golden() -> Vec<(&'static str, &'static str, &'static str)> {
+    HOST_IDENTITY_GOLDEN
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 4, "golden row needs 4 columns: {line:?}");
+            (cols[0], cols[1], cols[2])
+        })
+        .collect()
+}
+
+/// The probe's result with the running script's path replaced by `<script>`.
+fn probe_rows(value: &serde_json::Value, script: &str) -> Vec<(String, String)> {
+    value
+        .as_object()
+        .expect("probe returns an object")
+        .iter()
+        .map(|(k, v)| {
+            let v = v.as_str().expect("probe values are strings");
+            (k.clone(), if v == script { "<script>".to_string() } else { v.to_string() })
+        })
+        .collect()
+}
+
+fn node_column() -> Vec<(String, String)> {
+    host_identity_golden().into_iter().map(|(k, node, _)| (k.to_string(), node.to_string())).collect()
+}
+
+fn host_column() -> Vec<(String, String)> {
+    host_identity_golden().into_iter().map(|(k, _, host)| (k.to_string(), host.to_string())).collect()
+}
+
+fn run_probe_script(program: &str, script: &str) -> serde_json::Value {
+    let out = Command::new(program).arg(script).arg("--flag").env_remove(PI_BINARY_ENV).output().unwrap();
+    assert!(out.status.success(), "{program}: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// The golden's Node 22 column is what Node mode (and real Node 22, when on PATH) reports; the
+/// `versions` overlay plus pi's argv and env give exactly the pi column, workers inherit the
+/// overlay, and `fork()` children (Node mode) keep the plain Node identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_identity_golden_against_node_22() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write(dir.path(), "probe.js", &format!("console.log(JSON.stringify({HOST_IDENTITY_PROBE}));\n"));
+
+    assert_eq!(probe_rows(&run_probe_script(NODE_BIN, &script), &script), node_column(), "Node mode");
+    if let Some(node) = real_node() {
+        let version = Command::new(&node).arg("--version").output().unwrap();
+        if String::from_utf8_lossy(&version.stdout).starts_with("v22.") {
+            assert_eq!(probe_rows(&run_probe_script(&node, &script), &script), node_column(), "real Node 22");
+        }
+    }
+
+    let exe = std::env::current_exe().unwrap().display().to_string();
+    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    env.insert(PI_BINARY_ENV.to_string(), exe.clone());
+    let rt = JsRuntime::new(RuntimeOptions {
+        cwd: Some(dir.path().to_path_buf()),
+        env: Some(env),
+        argv: vec![exe.clone(), PI_ENTRY.to_string(), "--flag".to_string()],
+        versions: [("bun".to_string(), PI_BUN_VERSION.to_string())].into(),
+        node_exec: Some(vec![NODE_BIN.to_string()]),
+        ..Default::default()
+    })
+    .unwrap();
+    let host = rt.eval(HOST_IDENTITY_PROBE).await.unwrap();
+    assert_eq!(probe_rows(&host, &script), host_column(), "embedded runtime with pi's identity");
+    // The overlay comes after the built-in entries and leaves them alone.
+    let versions = rt.eval("Object.keys(process.versions).join()").await.unwrap();
+    assert_eq!(versions, "node,pi_jsrt,quickjs,v8,uv,modules,zlib,brotli,unicode,bun");
+
+    let src = format!(
+        r#"import {{ Worker }} from "node:worker_threads";
+import {{ fork }} from "node:child_process";
+const worker = await new Promise((resolve, reject) => {{
+  const w = new Worker("require('node:worker_threads').parentPort.postMessage(" + {probe:?} + ")", {{ eval: true }});
+  w.once("message", resolve);
+  w.once("error", reject);
+}});
+const child = await new Promise((resolve) => {{
+  const c = fork({script:?}, ["--flag"], {{ silent: true }});
+  let out = "";
+  c.stdout.on("data", (d) => (out += d));
+  c.on("close", () => resolve(JSON.parse(out)));
+}});
+export default {{ worker, child }};
+"#,
+        probe = HOST_IDENTITY_PROBE,
+    );
+    let ns = tokio::time::timeout(std::time::Duration::from_secs(60), rt.eval_module(src, "host-identity.mjs"))
+        .await
+        .expect("timed out")
+        .unwrap_or_else(|e| panic!("{e}\n{:?}", e.as_js().and_then(|j| j.stack.clone())));
+    let v = ns.get("default").await.unwrap();
+    assert_eq!(v["worker"]["process.versions.bun"], PI_BUN_VERSION, "workers share the host identity");
+    assert_eq!(v["worker"]["typeof globalThis.Bun"], "undefined");
+    let child: std::collections::HashMap<String, String> = probe_rows(&v["child"], &script).into_iter().collect();
+    for (probe, node) in node_column() {
+        // The child inherits the parent's environment, `PI_SUBAGENT_PI_BINARY` included.
+        if probe != "process.env.PI_SUBAGENT_PI_BINARY" {
+            assert_eq!(child[&probe], node, "fork() child: {probe}");
+        }
+    }
+    assert_eq!(child["process.env.PI_SUBAGENT_PI_BINARY"], exe);
+}

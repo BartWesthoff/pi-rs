@@ -66,3 +66,50 @@ created an own property instead of being ignored like the other non-integer nume
 
 Regression coverage:
 `crates/pi-jsrt/tests/engine_regressions.rs::typed_array_canonical_numeric_keys_are_still_integer_indexed`.
+
+## Synchronous `require()` of ES modules (`JS_RequireModule`)
+
+`JS_LoadModule` settles its promise through a promise job, so pi-jsrt's `require()` of an ES
+module ran the whole job queue to get the namespace. When that `require()` ran while a module
+graph with top-level await was still being evaluated (an extension that imports a TLA module and
+calls pi-ai's `StringEnum`, which lazily requires TypeBox), the queued jobs resumed the async
+module and `gather_available_ancestors` walked parents that were still on the synchronous
+evaluation stack: a segmentation fault. Draining the queue also ran unrelated microtasks in the
+middle of a synchronous call.
+
+`JS_RequireModule(ctx, basename, filename, &status)` resolves, links and evaluates the module
+without running jobs and returns its namespace, as Node's `require(esm)` does. It reports a graph
+with top-level await (`JS_REQUIRE_MODULE_ASYNC`, checked before anything is evaluated) or one that
+contains a module being linked or evaluated (`JS_REQUIRE_MODULE_CYCLE`) instead of evaluating it;
+pi-jsrt turns these into Node's `ERR_REQUIRE_ASYNC_MODULE` and `ERR_REQUIRE_CYCLE_MODULE`. An
+evaluation error is thrown (the module promise is marked handled, so it is not also reported as
+an unhandled rejection). A module that has already finished evaluating returns its namespace.
+
+Regression coverage: `crates/pi-jsrt/tests/require_esm.rs`.
+
+## Modules evaluated after an async dependency are done
+
+When a top-level-await module settled, `js_async_module_execution_fulfilled` ran its synchronous
+ancestors and marked them evaluated but left their `async_evaluation` flag set. A later `import()`
+of any module that depends on one of them then registered itself as waiting on that module, which
+never settles again, so the import never resolved (an extension's lazy `import()` of a module
+that shares dependencies with a top-level-await module hung forever). As in ECMA-262
+(AsyncModuleExecutionFulfilled sets `[[AsyncEvaluationOrder]]` to `done` for those modules), the
+flag is now cleared before the module is marked evaluated.
+
+Regression coverage:
+`crates/pi-jsrt/tests/engine_regressions.rs::import_after_async_graph_settles_does_not_wait_on_evaluated_modules`.
+
+## Interrupting `Atomics.wait` (`JS_InterruptAtomicsWait`)
+
+pi-jsrt lets every runtime block in `Atomics.wait` (`JS_SetCanBlock`, as Node does on the main
+thread too), but a thread blocked without a timeout never returned to its event loop, so
+`worker.terminate()` or a runtime shutdown could not stop it. `JS_InterruptAtomicsWait(rt)` (callable
+from any thread while `rt` is alive) marks the runtime under the Atomics mutex and signals its
+waiters (each waiter now records its runtime); the woken `Atomics.wait`, and every later one in that
+runtime, throws the uncatchable "interrupted" error of the interrupt handler, so the stack unwinds
+to the event loop, which then sees the shutdown.
+
+Regression coverage: `crates/pi-jsrt/tests/atomics.rs`
+(`terminate_wakes_a_blocked_worker_and_a_crashed_worker_times_out`,
+`embedded_runtimes_block_in_wait_and_shutdown_wakes_them`).

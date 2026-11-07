@@ -5,6 +5,9 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use super::http::{FetchTerminated, NetworkError};
+use crate::transport::{HttpResponse, ResponseBody, TransportError};
+
 /// One decoded server-sent event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSentEvent {
@@ -99,7 +102,11 @@ impl SseDecoder {
     pub fn push_text(&mut self, text: &str) -> Vec<ServerSentEvent> {
         self.buffer.push_str(text);
         let mut events = Vec::new();
-        while let Some(index) = next_line_break(&self.buffer) {
+        // Lines are read in place and the consumed prefix is dropped once, so a chunk holding
+        // many events costs time linear in its length.
+        let mut start = 0;
+        while let Some(offset) = next_line_break(&self.buffer[start..]) {
+            let index = start + offset;
             let bytes = self.buffer.as_bytes();
             let mut next = index + 1;
             if bytes[index] == b'\r' {
@@ -110,12 +117,12 @@ impl SseDecoder {
                     next += 1;
                 }
             }
-            let line = self.buffer[..index].to_string();
-            self.buffer = self.buffer[next..].to_string();
-            if let Some(event) = self.state.decode_line(&line) {
+            if let Some(event) = self.state.decode_line(&self.buffer[start..index]) {
                 events.push(event);
             }
+            start = next;
         }
+        self.buffer.drain(..start);
         events
     }
 
@@ -163,7 +170,7 @@ pub struct SseReader<S> {
 
 impl<S> SseReader<S>
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    S: Stream<Item = Result<Bytes, TransportError>> + Unpin,
 {
     pub fn new(body: S, signal: Option<CancellationToken>) -> Self {
         Self { body, decoder: SseDecoder::new(), queue: Default::default(), done: false, signal }
@@ -191,7 +198,7 @@ where
             };
             match chunk {
                 Some(Ok(bytes)) => self.queue.extend(self.decoder.push_bytes(&bytes)),
-                Some(Err(error)) => return Err(error.into()),
+                Some(Err(error)) => return Err(body_read_error(&error).into()),
                 None => {
                     self.done = true;
                     self.queue.extend(self.decoder.finish());
@@ -201,12 +208,24 @@ where
     }
 }
 
-/// Read SSE events from a reqwest response.
-pub fn sse_reader(
-    response: reqwest::Response,
-    signal: Option<CancellationToken>,
-) -> SseReader<impl Stream<Item = Result<Bytes, reqwest::Error>> + Unpin> {
-    SseReader::new(Box::pin(crate::utils::wasm::assert_send(response.bytes_stream())), signal)
+/// A failed body read as undici reports it: `fetch` resolved, then the stream rejected with
+/// `TypeError: terminated` (a dropped connection, or no data within the idle timeout, whose
+/// undici cause is a `BodyTimeoutError`). Retry classification matches that message.
+pub(crate) fn body_read_error(error: &TransportError) -> FetchTerminated {
+    let cause = if error.is_timeout() {
+        NetworkError {
+            code: Some("UND_ERR_BODY_TIMEOUT"),
+            message: "Body Timeout Error".into(),
+        }
+    } else {
+        error.network_error()
+    };
+    FetchTerminated { cause }
+}
+
+/// Read SSE events from a transport response.
+pub fn sse_reader(response: HttpResponse, signal: Option<CancellationToken>) -> SseReader<ResponseBody> {
+    SseReader::new(response.body, signal)
 }
 
 #[cfg(test)]
@@ -228,5 +247,65 @@ mod tests {
         assert_eq!(events[1].data, "x\ny");
         assert_eq!(events[1].raw, vec![": comment", "event: b", "data: x", "data:y"]);
         assert_eq!(events[2].data, "caf\u{e9}");
+    }
+
+    #[test]
+    fn decodes_many_events_in_one_chunk_and_split_at_every_byte() {
+        let body: String = (0..2_000)
+            .map(|i| format!("data: {{\"n\":{i}}}\r\n\r\n"))
+            .collect();
+        let mut whole = SseDecoder::new();
+        let mut events = whole.push_text(&body);
+        events.extend(whole.finish());
+        assert_eq!(events.len(), 2_000);
+        assert_eq!(events[1_999].data, "{\"n\":1999}");
+        assert!(whole.buffer.is_empty());
+
+        let mut split = SseDecoder::new();
+        let mut pieces = Vec::new();
+        for byte in body.as_bytes()[..2_000].chunks(1) {
+            pieces.extend(split.push_bytes(byte));
+        }
+        pieces.extend(split.push_bytes(&body.as_bytes()[2_000..]));
+        pieces.extend(split.finish());
+        assert_eq!(pieces, events);
+    }
+
+    /// `(event, data)` of every event decoded from `body` fed in `size`-byte pieces.
+    fn decode_split(body: &str, size: usize) -> Vec<(Option<String>, String)> {
+        let mut decoder = SseDecoder::new();
+        let mut events = Vec::new();
+        for piece in body.as_bytes().chunks(size) {
+            events.extend(decoder.push_bytes(piece));
+        }
+        events.extend(decoder.finish());
+        events.into_iter().map(|e| (e.event, e.data)).collect()
+    }
+
+    #[test]
+    fn keep_alive_comment_frames_yield_no_events_at_any_byte_split() {
+        const KEEP_ALIVE: &str = ": keep-alive\n\n";
+        let events = ["data: {\"a\":\"caf\u{e9}\"}\n\n", "event: delta\ndata: x\ndata: y\n\n", "data: [DONE]\n\n"];
+        let plain: String = events.concat();
+        // Leading blank lines and keep-alives before the first event, runs of keep-alives between
+        // events, and a comment line inside an event (between its fields).
+        let mut noisy = format!("\n\n{KEEP_ALIVE}{KEEP_ALIVE}");
+        for event in events {
+            noisy.push_str(&event.replacen("\ndata: y", "\n: keep-alive\ndata: y", 1));
+            noisy.push_str(&KEEP_ALIVE.repeat(3));
+        }
+        let expected = decode_split(&plain, plain.len());
+        assert_eq!(
+            expected,
+            vec![
+                (None, "{\"a\":\"caf\u{e9}\"}".to_string()),
+                (Some("delta".to_string()), "x\ny".to_string()),
+                (None, "[DONE]".to_string()),
+            ]
+        );
+        for size in 1..=noisy.len() {
+            assert_eq!(decode_split(&noisy, size), expected, "split at {size} bytes");
+        }
+        assert!(decode_split(&KEEP_ALIVE.repeat(4), 1).is_empty(), "keep-alives alone yield no event");
     }
 }

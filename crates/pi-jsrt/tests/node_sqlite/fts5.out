@@ -1,0 +1,17 @@
+match search: [{"[null]":{"rowid":3,"title":"Searching"}},{"[null]":{"rowid":1,"title":"SQLite FTS5"}}]
+match prefix: [{"[null]":{"rowid":3,"title":"Searching"}},{"[null]":{"rowid":1,"title":"SQLite FTS5"}}]
+match phrase: [{"[null]":{"rowid":1,"title":"SQLite FTS5"}}]
+match column: [{"[null]":{"rowid":2,"title":"Rust ports"}}]
+match boolean: [{"[null]":{"rowid":3,"title":"Searching"}}]
+match none: []
+bm25: [{"[null]":{"rowid":3,"score":0}},{"[null]":{"rowid":1,"score":0}}]
+rank column: [{"[null]":{"rowid":2,"rank":-1.1117}},{"[null]":{"rowid":1,"rank":0}},{"[null]":{"rowid":3,"rank":0}}]
+snippet: {"[null]":{"s":"…uses virtual tables and [ranking] functions."}}
+highlight: {"[null]":{"h":"<b>SQLite</b> FTS5"}}
+syntax error: {"error":{"name":"Error","message":"unterminated string","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+unknown column: {"error":{"name":"Error","message":"no such column: nope","code":"ERR_SQLITE_ERROR","errcode":1,"errstr":"SQL logic error"}}
+external content: [{"[null]":{"id":3,"text":"gamma delta"}}]
+integrity: {}
+trigram: [{"[null]":{"t":"context-mode keeps sessions searchable"}}]
+trigram like: {"[null]":{"n":1}}
+vocab: {"[null]":{"ok":1}}

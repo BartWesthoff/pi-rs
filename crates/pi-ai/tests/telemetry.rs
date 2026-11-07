@@ -63,7 +63,7 @@ fn message(stop_reason: StopReason) -> AssistantMessage {
             AssistantContent::Text(TextContent { text: "text-secret".into(), ..Default::default() }),
             AssistantContent::Thinking(ThinkingContent { thinking: "thinking-secret".into(), ..Default::default() }),
             AssistantContent::ToolCall(tool_call()),
-        ],
+        ].into(),
         usage: Usage {
             input: 11,
             output: 22,

@@ -1278,7 +1278,7 @@ async fn message_end_replacements_reach_tool_execution_state_and_later_events() 
                 "call-1",
                 "echo",
                 json!({ "value": "replaced" }),
-            ))];
+            ))].into();
             handle.replace_event_message(AgentMessage::Assistant(replaced));
         }
         AgentEvent::MessageEnd {

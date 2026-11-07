@@ -11,6 +11,7 @@ use crate::core::extensions::types::{ToolRenderContext, ToolRenderResultOptions,
 use crate::core::tools::js_util::{js_to_fixed, js_trim, js_trim_end, utf16_len, utf16_prefix};
 use crate::core::tools::render_utils::{
     get_content_text_output, replace_tabs, start_tool_timer, str_ref, tool_timer_text,
+    with_render_state,
 };
 use crate::core::tools::renderers::reuse_container;
 use crate::extensions::codemode::tool::{CodemodeNestedCall, CodemodeNestedCallStatus, CodemodeToolDetails};
@@ -18,7 +19,7 @@ use crate::modes::interactive::components::keybinding_hints::key_hint;
 use crate::modes::interactive::components::visual_truncate::{
     TruncateToVisualLinesKeep, VisualLinePreview, VisualLinePreviewOptions,
 };
-use crate::modes::interactive::theme::theme::{Theme, highlight_code};
+use crate::modes::interactive::theme::theme::{CodeHighlighter, Theme};
 use crate::modes::interactive::theme::theme_tokens::ThemeColor;
 use pi_agent::types::AgentToolResult;
 use pi_ai::types::UserContentBlock;
@@ -36,6 +37,13 @@ const OUTPUT_PREVIEW_LINES: i64 = 5;
 const COLLAPSED_ARGS_CHARS: usize = 80;
 static SCRIPT_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\AScript (completed|failed)\nWall time [\d.]+ seconds\nOutput:\n\z").unwrap());
+
+/// Renderer state of a codemode row.
+#[derive(Default)]
+struct CodemodeRenderState {
+    /// Progress, timer ticks and expanding redraw the call, so the row keeps the script's highlighting.
+    script_highlighter: Arc<CodeHighlighter>,
+}
 
 fn expand_hint(theme: &Theme, hidden: f64, noun: &str) -> String {
     format!(
@@ -134,7 +142,15 @@ fn render_call(args: &Value, theme: &Arc<Theme>, context: &ToolRenderContext) ->
     };
     component.add_child(Arc::new(Text::new(title, 0, 0, None)));
     if !code.is_empty() {
-        let highlighted = highlight_code(&replace_tabs(js_trim_end(&code.replace('\r', ""))), Some("javascript")).join("\n");
+        let highlighter = with_render_state::<CodemodeRenderState, _>(&context.state, |state| {
+            state.script_highlighter.clone()
+        });
+        let highlighted = highlighter
+            .highlight(
+                &replace_tabs(js_trim_end(&code.replace('\r', ""))),
+                Some("javascript"),
+            )
+            .join("\n");
         if context.expanded {
             component.add_child(Arc::new(Text::new(highlighted, 0, 0, None)));
         } else {
