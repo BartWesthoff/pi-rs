@@ -40,15 +40,39 @@ fn normalize(text: &str, sandbox: &Sandbox) -> String {
             let end = line[name_at..].find(char::is_whitespace).map_or(line.len(), |offset| name_at + offset);
             line.replace_range(name_at..end, "<SESSION>");
         }
+        // The footer's context counters are host bookkeeping, not package UI, and after `/compact`
+        // pi-rs counts the transcript differently from TS Pi (↑40 ↓20 vs ↑50 ↓25).
+        if line.contains('↑') {
+            line = strip_counters(&line);
+        }
         if line.starts_with("Pane is dead (status ") {
             line = "Pane is dead (status <EXIT>)".to_string();
         }
-        lines.push(line);
+        lines.push(line.trim_end().to_string());
     }
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
     lines.join("\n")
+}
+
+/// Replaces the `↑N ↓M` context counters with `↑<N> ↓<N>`.
+fn strip_counters(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '↑' || c == '↓' {
+            let digits: String = chars.clone().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                for _ in 0..digits.len() {
+                    chars.next();
+                }
+                out.push_str("<N>");
+            }
+        }
+    }
+    out
 }
 
 /// Runs one tmux plan and returns the recorded snapshots, normalized, in plan order.
@@ -294,6 +318,9 @@ fn ui_question_over_overlay() {
         "steps": [
             {"wait": "mock-model", "timeout": 120},
             {"text": "Ask me."}, {"keys": ["Enter"]},
+            // The probe overlay mounts before the question is raised; waiting for it keeps the
+            // snapshot from catching the question before the overlay below it has painted.
+            {"wait": "OVERLAY PROBE OPEN", "timeout": 120},
             {"wait": "Which color should we use?", "timeout": 120},
             {"snap": "question"},
             {"keys": ["Down"]}, {"snap": "moved"},
@@ -356,6 +383,8 @@ fn ui_ponytail_ultra_continue() {
             "steps": [
                 {"wait": "ponytail: ⚡ FULL", "timeout": 120},
                 {"text": "/ponytail ultra"},
+                // Re-sending Enter cannot repair characters dropped while the editor boots.
+                {"wait": "/ponytail ultra", "timeout": 30},
                 {"keys": ["Enter"], "until": "Ponytail mode set to ultra.", "tries": 3, "timeout": 5},
                 {"wait": "ULTRA", "timeout": 60},
                 {"snap": "ultra"},
