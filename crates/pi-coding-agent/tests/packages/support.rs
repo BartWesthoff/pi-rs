@@ -24,7 +24,7 @@ const FIXTURES_DIR_ENV: &str = "PI_RS_PKG_FIXTURES_DIR";
 /// it to TS Pi 1.4.0 under node.
 const HOST_ENV: &str = "PI_RS_PKG_HOST";
 /// Set to write observations into the golden file instead of comparing against it.
-const GOLDEN_WRITE_ENV: &str = "PI_RS_PKG_GOLDEN_WRITE";
+pub const GOLDEN_WRITE_ENV: &str = "PI_RS_PKG_GOLDEN_WRITE";
 /// Per-run timeout in seconds.
 const TIMEOUT_ENV: &str = "PI_RS_PKG_TIMEOUT_SECS";
 /// How many host processes may run at once (each one loads every package).
@@ -48,7 +48,8 @@ pub fn pins_dir() -> PathBuf {
     manifest_dir().join("tests/fixtures/packages")
 }
 
-fn mock_dir() -> PathBuf {
+/// Helpers and mock servers shared by the package scenarios.
+pub fn mock_dir() -> PathBuf {
     manifest_dir().join("tests/fixtures/mock")
 }
 
@@ -180,7 +181,28 @@ impl Sandbox {
         Self { _dir: dir, home, agent_dir, project, tmp }
     }
 
-    fn write_models(&self, port: u16) {
+    /// The project directory the host runs in.
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
+
+    /// A scratch directory inside the sandbox, wiped with it.
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// Overrides top-level settings (for example `compaction`) before the host starts.
+    pub fn set_settings(&self, extra: &Value) {
+        let path = self.agent_dir.join("settings.json");
+        let mut settings = read_json(&path);
+        if let (Some(settings), Some(extra)) = (settings.as_object_mut(), extra.as_object()) {
+            settings.extend(extra.clone());
+        }
+        write_json(&path, &settings);
+    }
+
+    /// Points `models.json` at the mock model on `port`.
+    pub fn write_models(&self, port: u16) {
         let models = json!({
             "providers": {
                 "mock": {
@@ -255,11 +277,67 @@ fn netns_command(program_and_args: &[&str]) -> Command {
 }
 
 /// The host command line: [`HOST_ENV`] split on whitespace, or this crate's `pi` binary.
-fn host_command() -> Vec<String> {
+pub fn host_command() -> Vec<String> {
     match std::env::var(HOST_ENV) {
         Ok(line) if !line.trim().is_empty() => line.split_whitespace().map(str::to_string).collect(),
         _ => vec![env!("CARGO_BIN_EXE_pi").to_string()],
     }
+}
+
+/// The command line that starts `host_args` next to a mock model playing `script`.
+pub fn host_beside_mock(sandbox: &Sandbox, name: &str, script: &Value, host_args: &[&str]) -> Vec<String> {
+    let port = mock_port();
+    sandbox.write_models(port);
+    let script_path = sandbox.tmp.join(format!("{name}.mock-script.json"));
+    write_json(&script_path, script);
+    let log = sandbox.tmp.join(format!("{name}.mock-log.jsonl"));
+    let mut argv: Vec<String> = vec![
+        mock_dir().join("with-mockllm.sh").display().to_string(),
+        port.to_string(),
+        script_path.display().to_string(),
+        log.display().to_string(),
+    ];
+    argv.extend(host_command());
+    argv.extend(host_args.iter().map(|arg| arg.to_string()));
+    argv
+}
+
+/// The port the mock model listens on for this run: the netns one, or a free port.
+pub fn mock_port() -> u16 {
+    match isolation() {
+        Isolation::NetNs => NETNS_MOCK_PORT,
+        Isolation::Offline => free_port(),
+    }
+}
+
+/// A command for a helper program (`tuidrive.py`, `rpcdrive.py`) that must see exactly what a host
+/// run sees — the sandbox `HOME`, agent dir and project — under the same network isolation.
+pub fn sandbox_command(sandbox: &Sandbox, argv: &[&str]) -> Command {
+    let mut command = match isolation() {
+        Isolation::NetNs => netns_command(argv),
+        Isolation::Offline => {
+            let mut command = Command::new(argv[0]);
+            command.args(&argv[1..]);
+            command
+        }
+    };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &sandbox.home)
+        .env("PI_CODING_AGENT_DIR", &sandbox.agent_dir)
+        .env("PI_OFFLINE", "1")
+        .env("TMPDIR", &sandbox.tmp)
+        .env("TERM", "dumb")
+        .env("NO_COLOR", "1")
+        .env("LANG", "C.UTF-8")
+        .env("TZ", "UTC")
+        .current_dir(&sandbox.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 /// Bounds the number of concurrently running hosts.

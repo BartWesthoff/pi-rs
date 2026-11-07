@@ -1544,6 +1544,16 @@ fn tui_call(bridge: &Arc<Bridge>, payload: &Value) -> anyhow::Result<Value> {
             Value::Null
         }
         "hasOverlay" => json!(bridge.ui_dispatch_wait(move || tui.has_overlay())?),
+        "getTopmostVisibleOverlay" => match bridge.ui_dispatch_wait(move || tui.get_topmost_visible_overlay())? {
+            None => Value::Null,
+            Some(overlay) => {
+                let component = match pi_tui::tui::downcast_component::<JsComponent>(&overlay.component) {
+                    Some(js) => json!({ "js": js.handle.to_value() }),
+                    None => json!({ "rid": register_rust_component(bridge, overlay.component.clone()) }),
+                };
+                json!({ "component": component, "focusOrder": overlay.focus_order })
+            }
+        },
         "start" => {
             bridge.ui_dispatch(move || tui.start());
             Value::Null

@@ -381,6 +381,15 @@ pub struct OverlayBounds {
     pub height: i64,
 }
 
+/// A visible overlay as [`Tui::get_topmost_visible_overlay`] reports it.
+#[derive(Clone)]
+pub struct VisibleOverlay {
+    /// The overlay's component.
+    pub component: ComponentRef,
+    /// Focus order; larger is more recently focused.
+    pub focus_order: u64,
+}
+
 struct OverlayEntryState {
     pre_focus: Option<ComponentRef>,
     hidden: bool,
@@ -1474,6 +1483,18 @@ impl Tui {
             return visible(self.terminal.columns(), self.terminal.rows());
         }
         true
+    }
+
+    /// The visually frontmost visible capturing overlay (TS `getTopmostVisibleOverlay()`):
+    /// non-capturing and hidden overlays are skipped.
+    pub fn get_topmost_visible_overlay(&self) -> Option<VisibleOverlay> {
+        if let Some(target) = self.redirect_target() {
+            return target.get_topmost_visible_overlay();
+        }
+        self.topmost_visible_overlay().map(|entry| VisibleOverlay {
+            component: entry.component.clone(),
+            focus_order: entry.lock().focus_order,
+        })
     }
 
     fn topmost_visible_overlay(&self) -> Option<EntryRef> {
