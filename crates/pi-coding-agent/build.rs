@@ -37,6 +37,12 @@ fn fnv1a(hash: &mut u64, bytes: &[u8]) {
 }
 
 fn main() {
+    // Native addons (`.node`) resolve the N-API C functions from the dynamic symbol table of the
+    // executable, so `pi-napi`'s `napi_*` entry points must be exported from `pi`.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol=napi_*");
+        println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol=node_api_*");
+    }
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     for name in ROOT_FILES {

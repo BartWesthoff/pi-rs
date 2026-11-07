@@ -1,0 +1,14 @@
+[package]
+name = "pi-napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node-API (N-API) v8 over pi-quickjs: the C function table native .node addons link against"
+
+[dependencies]
+pi-quickjs.workspace = true
+
+[dev-dependencies]
+pi-jsrt = { path = "../pi-jsrt" }
+tokio = { workspace = true }
+serde_json.workspace = true

@@ -122,6 +122,19 @@ struct EngineData {
 
 thread_local! {
     static ENGINE: Cell<*const EngineData> = const { Cell::new(ptr::null()) };
+    /// Call flags of the native function currently running (QuickJS `JS_CALL_FLAG_*`).
+    static CALL_FLAGS: Cell<c_int> = const { Cell::new(0) };
+}
+
+/// Call flags of the native function currently running on this thread (QuickJS
+/// `JS_CALL_FLAG_CONSTRUCTOR` is 1; 0 outside native functions).
+pub fn current_call_flags() -> c_int {
+    CALL_FLAGS.with(|f| f.get())
+}
+
+/// Is the native function currently running called with `new`?
+pub fn in_constructor_call() -> bool {
+    current_call_flags() & 1 != 0
 }
 
 fn try_engine() -> Option<&'static EngineData> {
@@ -1859,6 +1872,18 @@ impl PropertyDescriptor {
     pub fn value(&self) -> Option<&JsValue> {
         self.value.as_ref()
     }
+    /// The `enumerable` flag, when known.
+    pub fn enumerable(&self) -> Option<bool> {
+        self.enumerable
+    }
+    /// The `writable` flag, when known.
+    pub fn writable(&self) -> Option<bool> {
+        self.writable
+    }
+    /// The `configurable` flag, when known.
+    pub fn configurable(&self) -> Option<bool> {
+        self.configurable
+    }
 }
 
 impl PropertyDescriptorBuilder {
@@ -2215,6 +2240,12 @@ impl JsObject {
         }))
     }
 
+    /// `delete obj[key]` (false when the property is not configurable, no throw).
+    pub fn delete_property<K: Into<PropertyKey>>(&self, key: K, ctx: &mut Context) -> JsResult<bool> {
+        let atom = key.into().atom(ctx)?;
+        Ok(check_int(ctx.raw, unsafe { qjs::JS_DeleteProperty(ctx.raw, self.0.0, atom.0, 0) })? != 0)
+    }
+
     /// `delete obj[key]` (throws when the property is not configurable).
     pub fn delete_property_or_throw<K: Into<PropertyKey>>(
         &self,
@@ -2481,7 +2512,7 @@ unsafe extern "C" fn fn_call(
     this_val: qjs::JSValue,
     argc: c_int,
     argv: *mut qjs::JSValue,
-    _flags: c_int,
+    flags: c_int,
 ) -> qjs::JSValue {
     let e = engine();
     let p = unsafe { qjs::JS_GetOpaque(func_obj, e.fn_class) } as *const FnBox;
@@ -2497,7 +2528,9 @@ unsafe extern "C" fn fn_call(
         .collect();
     let this = unsafe { JsValue::from_raw_dup(this_val) };
     let mut c = Context::from_raw(ctx);
+    let prev = CALL_FLAGS.with(|fl| fl.replace(flags));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&this, &args, &mut c)));
+    CALL_FLAGS.with(|fl| fl.set(prev));
     match r {
         Ok(Ok(v)) => v.into_raw(),
         Ok(Err(err)) => throw(ctx, err),

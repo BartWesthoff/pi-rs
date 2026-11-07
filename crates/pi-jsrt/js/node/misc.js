@@ -398,7 +398,8 @@ function matchesError(err, expected) {
     if (Error.isPrototypeOf(expected) || expected === Error) return false;
     return expected(err) === true;
   }
-  if (expected instanceof RegExp) return expected.test(String(err?.message ?? err));
+  // Node tests a RegExp against the error's string form ("Error: message").
+  if (expected instanceof RegExp) return expected.test(String(err));
   if (typeof expected === "object") {
     return Object.keys(expected).every((k) =>
       expected[k] instanceof RegExp && typeof err[k] === "string" ? expected[k].test(err[k]) : internal.isDeepEqual(err[k], expected[k]),

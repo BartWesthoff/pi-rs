@@ -10,6 +10,8 @@ license = "MIT"
 repository = "https://github.com/lassejlv/pi-rs"
 
 [workspace.dependencies]
+djs-core = { git = "https://github.com/earendil-works/djs.git", rev = "23b4548c4dfe40c833ca271d0b008cd08acb2d01" }
+djs-prelude = { git = "https://github.com/earendil-works/djs.git", rev = "23b4548c4dfe40c833ca271d0b008cd08acb2d01" }
 pi-chord = { path = "crates/pi-chord" }
 pi-durable = { path = "crates/pi-durable" }
 pi-durable-jsrt = { path = "crates/pi-durable-jsrt" }
@@ -21,6 +23,7 @@ pi-mcp = { path = "crates/pi-mcp" }
 pi-codemode = { path = "crates/pi-codemode" }
 pi-jsrt = { path = "crates/pi-jsrt" }
 pi-quickjs = { path = "crates/pi-quickjs" }
+pi-napi = { path = "crates/pi-napi" }
 pi-telemetry = { path = "crates/pi-telemetry" }
 pi-json = { path = "crates/pi-json" }
 pi-embed = { path = "crates/pi-embed" }
@@ -88,6 +91,12 @@ globset = "0.4"
 # Disk is limited in the build environment: keep debug info small.
 [profile.dev]
 debug = "line-tables-only"
+
+# djs executes JavaScript in Rust, so development VMs need an optimized interpreter.
+[profile.dev.package.djs-core]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 [profile.dev.package."*"]
 debug = false

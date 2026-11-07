@@ -35,6 +35,7 @@ Never copy TypeScript into this repository.
 | (new)                           | `crates/pi-durable-jsrt`    | Serves `@earendil-works/pi-durable` and `@earendil-works/chord` to extensions as embedded pi-jsrt modules. |
 | (new)                           | `crates/pi-durable-codec-stock` | Test-only WebAssembly bindings that compile the production durable codec sources for the unchanged stock codec tests. |
 | `packages/coding-agent`         | `crates/pi-coding-agent`    | The `pi` binary (`src/main.rs`) and library |
+| (new)                           | `crates/pi-napi`            | Node-API v8 C function table over QuickJS, so unchanged `.node` addons load in `pi-jsrt` |
 
 Module layout mirrors the TS file layout: `src/core/session-manager.ts` becomes
 `src/core/session_manager.rs`, directories become modules.

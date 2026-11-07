@@ -12,6 +12,7 @@ pi-mcp.workspace = true
 pi-codemode.workspace = true
 pi-telemetry.workspace = true
 pi-jsrt.workspace = true
+pi-napi.workspace = true
 pi-durable-jsrt.workspace = true
 pi-json.workspace = true
 tokio.workspace = true
