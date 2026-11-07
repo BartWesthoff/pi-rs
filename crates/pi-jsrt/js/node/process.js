@@ -351,6 +351,21 @@ Object.assign(process, {
   binding(name) {
     throw new Error(`No such module: ${name}`);
   },
+  // Node's entry point for native addons: `require("x.node")` calls this with the CommonJS
+  // module object. `flags` (RTLD_*) is ignored; the addon is never unloaded.
+  dlopen(module, filename, flags) {
+    if (!module || typeof module !== "object") {
+      const err = new TypeError(`The "module" argument must be of type object. Received ${internal.describeReceived(module)}`);
+      err.code = "ERR_INVALID_ARG_TYPE";
+      throw err;
+    }
+    if (typeof filename !== "string") {
+      const err = new TypeError(`The "filename" argument must be of type string. Received ${internal.describeReceived(filename)}`);
+      err.code = "ERR_INVALID_ARG_TYPE";
+      throw err;
+    }
+    module.exports = ops.dlopen(filename);
+  },
   setUncaughtExceptionCaptureCallback() {},
   hasUncaughtExceptionCaptureCallback: () => false,
   setSourceMapsEnabled() {},

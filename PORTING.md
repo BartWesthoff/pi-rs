@@ -29,6 +29,7 @@ Never copy TypeScript into this repository.
 | `packages/codemode`             | `crates/pi-codemode`        | Code mode runtime (JS scripts calling tools) |
 | (new)                           | `crates/pi-jsrt`            | Embedded JavaScript runtime (QuickJS via rquickjs + oxc TS stripping, ESM loader, Node API shims). Used by extensions and codemode. |
 | `packages/coding-agent`         | `crates/pi-coding-agent`    | The `pi` binary (`src/main.rs`) and library |
+| (new)                           | `crates/pi-napi`            | Node-API v8 C function table over QuickJS, so unchanged `.node` addons load in `pi-jsrt` |
 
 Module layout mirrors the TS file layout: `src/core/session-manager.ts` becomes
 `src/core/session_manager.rs`, directories become modules.

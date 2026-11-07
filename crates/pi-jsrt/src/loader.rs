@@ -87,6 +87,8 @@ enum Format {
     Esm,
     Cjs,
     Json,
+    /// A native addon (`.node`): loaded with `dlopen`, never compiled as source.
+    Native,
 }
 
 struct Prepared {
@@ -107,6 +109,8 @@ pub(crate) struct Loader {
     cjs: RefCell<HashMap<String, JsObject>>,
     values: RefCell<HashMap<String, JsValue>>,
     pkg_json: RefCell<HashMap<PathBuf, Option<Rc<Value>>>>,
+    /// Addons loaded by this loader; their cleanup hooks run when the runtime stops.
+    native: RefCell<Vec<crate::native::Loaded>>,
     generation: Cell<u32>,
     evals: Cell<u32>,
 }
@@ -122,6 +126,7 @@ impl Loader {
             cjs: RefCell::default(),
             values: RefCell::default(),
             pkg_json: RefCell::default(),
+            native: RefCell::default(),
             generation: Cell::new(0),
             evals: Cell::new(0),
         }
@@ -145,6 +150,9 @@ impl Loader {
     }
 
     pub(crate) fn clear(&self) {
+        for mut addon in self.native.borrow_mut().drain(..) {
+            addon.destroy();
+        }
         self.synthetic.borrow_mut().clear();
         self.cjs.borrow_mut().clear();
         self.values.borrow_mut().clear();
@@ -409,6 +417,13 @@ impl Loader {
     // -----------------------------------------------------------------------
 
     fn prepare_file(&self, ctx: &mut Context, path: &Path) -> Result<Prepared, Error> {
+        // A native addon is a shared library, not source: `require_resolved` loads it.
+        if crate::native::is_addon(path) {
+            return Ok(Prepared {
+                code: String::new(),
+                format: Format::Native,
+            });
+        }
         let source = self.shared.file_sources.read().get(path).cloned();
         let text = match source {
             Some(text) => text,
@@ -528,6 +543,10 @@ impl Loader {
                 let prepared = self.prepare_file(ctx, path)?;
                 match prepared.format {
                     Format::Esm => compile_module(ctx, &prepared.code, name).map_err(|e| with_file(e, path))?,
+                    Format::Native => {
+                        let v = crate::native::require(ctx, path).map_err(|e| error::from_js(e, ctx))?;
+                        self.synthetic_from_value(ctx, v, name, false).map_err(|e| error::from_js(e, ctx))?
+                    }
                     Format::Json => {
                         let v = parse_json_text(ctx, &prepared.code, path)?;
                         self.synthetic_from_value(ctx, v, name, false).map_err(|e| error::from_js(e, ctx))?
@@ -630,6 +649,11 @@ impl Loader {
             Resolved::File(path) => {
                 let prepared = self.prepare_file(ctx, path).map_err(|e| error::to_js(&e, ctx))?;
                 match prepared.format {
+                    Format::Native => {
+                        let v = crate::native::require(ctx, path)?;
+                        self.values.borrow_mut().insert(key, v.clone());
+                        Ok(v)
+                    }
                     Format::Json => {
                         let v = parse_json_text(ctx, &prepared.code, path).map_err(|e| error::to_js(&e, ctx))?;
                         self.values.borrow_mut().insert(key, v.clone());
@@ -696,7 +720,7 @@ impl Loader {
     }
 }
 
-const EXTENSIONS: &[&str] = &[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json"];
+const EXTENSIONS: &[&str] = &[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".node"];
 
 fn strip_shebang(text: String) -> String {
     match text.strip_prefix("#!") {
@@ -1160,8 +1184,20 @@ fn op_eval_script(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     eval_script(ctx, &code, &name)
 }
 
+/// `ops.dlopen(filename)`: load a native addon and return its exports (`process.dlopen`).
+fn op_dlopen(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let filename = arg_string(args, 0, ctx)?;
+    crate::native::require(ctx, Path::new(&filename))
+}
+
+/// Keep a loaded addon alive with its loader (its cleanup hooks run at teardown).
+pub(crate) fn add_native(ctx: &Context, addon: crate::native::Loaded) {
+    loader(ctx).native.borrow_mut().push(addon);
+}
+
 pub(crate) const LOADER_OPS: &[(&str, usize, engine::OpFn)] = &[
     ("evalScript", 2, op_eval_script),
+    ("dlopen", 1, op_dlopen),
     ("isCommonJs", 1, op_is_common_js),
     ("require", 2, op_require),
     ("requireResolve", 3, op_require_resolve),

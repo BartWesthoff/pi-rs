@@ -109,6 +109,7 @@ pub mod ctx;
 mod engine;
 mod error;
 mod loader;
+mod native;
 pub mod node;
 mod ops;
 mod runtime;
