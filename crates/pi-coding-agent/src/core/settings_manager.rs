@@ -1444,6 +1444,12 @@ impl SettingsManager {
         self.with_settings(|s| bool_or(nested(s, "compaction", "enabled"), defaults::compaction::ENABLED))
     }
 
+    /// `compaction.reuseChatPrefix` (pi-rs only, LM-19): whether compaction summary requests
+    /// replay the chat prefix. `None` when unset or not a boolean (the caller's default applies).
+    pub fn get_compaction_reuse_chat_prefix(&self) -> Option<bool> {
+        self.with_settings(|s| nested(s, "compaction", "reuseChatPrefix").and_then(Value::as_bool))
+    }
+
     pub fn set_compaction_enabled(&self, enabled: bool) {
         self.set_global_nested("compaction", "enabled", Value::Bool(enabled));
     }

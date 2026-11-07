@@ -1107,6 +1107,126 @@ pub fn prepare_compaction(
 }
 
 // ============================================================================
+// Chat-prefix summarization (pi-rs divergence, LM-19)
+// ============================================================================
+
+/// The chat context a compaction summary request can replay (`compaction.reuseChatPrefix`).
+///
+/// A local server (llama.cpp, NInfer) keeps the state of the last chat request. A summary
+/// request that sends the chat's own messages, system messages and tool declarations unchanged
+/// and adds one instruction message looks to the server like the next chat turn: it prefills
+/// only the instruction. TypeScript pi's standalone summary request shares no prefix with the
+/// chat and must prefill the serialized conversation from scratch. Hybrid models (recurrent or
+/// convolutional layers, as Bonsai and LFM) can only resume from the end of a cached request or
+/// from a server checkpoint, not from an arbitrary earlier position, so the request replays the
+/// whole context rather than only the part being summarized.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompactionChatPrefix {
+    /// The agent's model-visible context messages (system messages included), in order.
+    pub messages: Vec<AgentMessage>,
+}
+
+/// The chat context of the branch `path_entries` ends in, as the agent sends it.
+pub fn prepare_compaction_chat_prefix(path_entries: &[SessionEntry]) -> Option<CompactionChatPrefix> {
+    let messages = build_session_projection(path_entries, None, None).messages;
+    (!messages.is_empty()).then_some(CompactionChatPrefix { messages })
+}
+
+/// Leads the chat-prefix instruction: the request continues the chat, so the model must be told
+/// explicitly to stop working on it. Carries the standalone request's system prompt.
+const CHAT_PREFIX_PREAMBLE: &str = "Stop working on the conversation above. Do NOT continue it, do NOT respond to any questions in it and do NOT call any tools. Your only task now is the summary described below; ONLY output that summary.";
+
+static CHAT_PREFIX_UPDATE_SUMMARIZATION_PROMPT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "The messages above are a conversation to summarize. It starts with the existing summary of earlier history in <summary> tags; incorporate the messages after it into that summary.\n\n{UPDATE_SUMMARIZATION_INSTRUCTIONS}"
+    )
+});
+
+/// The trailing instruction of a chat-prefix summary request.
+pub fn chat_prefix_summarization_instruction(has_previous_summary: bool, custom_instructions: Option<&str>) -> String {
+    let prompt = if has_previous_summary {
+        CHAT_PREFIX_UPDATE_SUMMARIZATION_PROMPT.as_str()
+    } else {
+        SUMMARIZATION_PROMPT
+    };
+    let instruction = format!("{CHAT_PREFIX_PREAMBLE}\n\n{prompt}");
+    match custom_instructions.filter(|s| !s.is_empty()) {
+        Some(custom_instructions) => format!("{instruction}\n\nAdditional focus: {custom_instructions}"),
+        None => instruction,
+    }
+}
+
+/// Request parameters shared by every summary request of one compaction.
+struct SummaryRequest<'a> {
+    model: &'a Model,
+    api_key: Option<&'a str>,
+    headers: Option<&'a IndexMap<String, String>>,
+    env: Option<&'a IndexMap<String, String>>,
+    signal: Option<CancellationToken>,
+    thinking_level: Option<ThinkingLevel>,
+    stream_fn: Option<StreamFn>,
+    retry: Option<&'a RetryPolicy>,
+    callbacks: Option<&'a RetryCallbacks>,
+    session_id: Option<&'a str>,
+}
+
+impl SummaryRequest<'_> {
+    fn options(&self) -> SimpleStreamOptions {
+        create_summarization_options(
+            self.model,
+            self.api_key,
+            self.headers,
+            self.env,
+            self.signal.as_ref(),
+            self.thinking_level,
+            self.session_id,
+        )
+    }
+}
+
+/// Outcome of a chat-prefix summary request that cannot be used as the summary.
+struct ChatPrefixRejected {
+    /// Usage of a response that arrived but was unusable (tool call, no text).
+    usage: Option<Usage>,
+}
+
+/// Summarize `prefix` (the chat context, converted for the LLM) followed by `instruction` as a
+/// new user message.
+async fn summarize_chat_prefix(
+    request: &SummaryRequest<'_>,
+    prefix: Vec<Message>,
+    instruction: String,
+) -> anyhow::Result<Result<GenerateSummaryWithUsageResult, ChatPrefixRejected>> {
+    let mut messages = prefix;
+    messages.push(Message::User(UserMessage::new(
+        UserContent::Blocks(vec![UserContentBlock::text(instruction)]),
+        chrono::Utc::now().timestamp_millis(),
+    )));
+    let response = complete_summarization(
+        request.model,
+        pi_ai::utils::transcript::transcript_from_messages(messages),
+        request.options(),
+        request.stream_fn.clone(),
+        request.retry,
+        request.callbacks,
+    )
+    .await?;
+    if get_summarization_failure(&response, "Summarization").is_some() {
+        return Ok(Err(ChatPrefixRejected { usage: None }));
+    }
+    let text = pi_ai::assistant_content_text(&response.content, "\n");
+    if response.tool_calls().next().is_some() || text.trim().is_empty() {
+        return Ok(Err(ChatPrefixRejected {
+            usage: Some(response.usage),
+        }));
+    }
+    Ok(Ok(GenerateSummaryWithUsageResult {
+        text,
+        usage: response.usage,
+    }))
+}
+
+// ============================================================================
 // Main compaction function
 // ============================================================================
 
@@ -1146,93 +1266,152 @@ pub async fn compact(
     callbacks: Option<&RetryCallbacks>,
     session_id: Option<&str>,
 ) -> anyhow::Result<CompactionResult> {
+    let request = SummaryRequest {
+        model,
+        api_key,
+        headers,
+        env,
+        signal,
+        thinking_level,
+        stream_fn,
+        retry,
+        callbacks,
+        session_id,
+    };
+    let (summary, usage) = generate_standalone_summaries(preparation, &request, custom_instructions).await?;
+    finish_compaction_result(preparation, summary, usage)
+}
+
+/// [`compact`], but the summary comes from one request that replays the chat context in
+/// `chat_prefix` (converted for the LLM by `convert`, as the agent converts its context)
+/// followed by the summarization instruction, so a server that cached the chat prefills only
+/// the instruction. That summary covers the whole context, including the messages compaction
+/// keeps, so a split turn needs no separate turn prefix summary. A chat-prefix request that
+/// fails, returns no text or calls a tool falls back to [`compact`]'s requests, and the usage
+/// of both is reported; an abort is not retried.
+/// pi-rs divergence (LM-19, `compaction.reuseChatPrefix`).
+#[allow(clippy::too_many_arguments)]
+pub async fn compact_with_chat_prefix(
+    preparation: &CompactionPreparation,
+    chat_prefix: &CompactionChatPrefix,
+    convert: &(dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync),
+    model: &Model,
+    api_key: Option<&str>,
+    headers: Option<&IndexMap<String, String>>,
+    custom_instructions: Option<&str>,
+    signal: Option<CancellationToken>,
+    thinking_level: Option<ThinkingLevel>,
+    stream_fn: Option<StreamFn>,
+    env: Option<&IndexMap<String, String>>,
+    retry: Option<&RetryPolicy>,
+    callbacks: Option<&RetryCallbacks>,
+    session_id: Option<&str>,
+) -> anyhow::Result<CompactionResult> {
+    let request = SummaryRequest {
+        model,
+        api_key,
+        headers,
+        env,
+        signal,
+        thinking_level,
+        stream_fn,
+        retry,
+        callbacks,
+        session_id,
+    };
+    let has_previous_summary = preparation.previous_summary.as_deref().is_some_and(|s| !s.is_empty());
+    let instruction = chat_prefix_summarization_instruction(has_previous_summary, custom_instructions);
+    let attempt = summarize_chat_prefix(&request, convert(&chat_prefix.messages), instruction).await;
+    let rejected_usage = match attempt {
+        Ok(Ok(result)) => return finish_compaction_result(preparation, result.text, result.usage),
+        Ok(Err(rejected)) => rejected.usage,
+        Err(_) => None,
+    };
+    if request.signal.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        anyhow::bail!("Summarization aborted");
+    }
+    let (summary, usage) = generate_standalone_summaries(preparation, &request, custom_instructions).await?;
+    let usage = match rejected_usage {
+        Some(rejected) => combine_usage(&rejected, &usage),
+        None => usage,
+    };
+    finish_compaction_result(preparation, summary, usage)
+}
+
+/// TypeScript pi's summary requests: the history summary and, for a split turn, the turn prefix
+/// summary, merged into one summary text.
+async fn generate_standalone_summaries(
+    preparation: &CompactionPreparation,
+    request: &SummaryRequest<'_>,
+    custom_instructions: Option<&str>,
+) -> anyhow::Result<(String, Usage)> {
     let CompactionPreparation {
-        first_kept_entry_id,
         messages_to_summarize,
         turn_prefix_messages,
         is_split_turn,
-        tokens_before,
         previous_summary,
-        file_ops,
         ..
     } = preparation;
+    let history_summary = || {
+        generate_summary_with_usage(
+            messages_to_summarize,
+            request.model,
+            None,
+            request.api_key,
+            request.headers,
+            request.signal.clone(),
+            custom_instructions,
+            previous_summary.as_deref(),
+            request.thinking_level,
+            request.stream_fn.clone(),
+            request.env,
+            request.retry,
+            request.callbacks,
+            request.session_id,
+        )
+    };
 
     // Generate summaries and merge into one
-    let mut summary: String;
-    let summary_usage: Usage;
-
     if *is_split_turn && !turn_prefix_messages.is_empty() {
         let mut history_text = previous_summary
             .clone()
             .unwrap_or_else(|| "No prior history.".to_string());
         let mut history_usage: Option<Usage> = None;
         if !messages_to_summarize.is_empty() {
-            let history_result = generate_summary_with_usage(
-                messages_to_summarize,
-                model,
-                None,
-                api_key,
-                headers,
-                signal.clone(),
-                custom_instructions,
-                previous_summary.as_deref(),
-                thinking_level,
-                stream_fn.clone(),
-                env,
-                retry,
-                callbacks,
-                session_id,
-            )
-            .await?;
+            let history_result = history_summary().await?;
             history_text = history_result.text;
             history_usage = Some(history_result.usage);
         }
-        let turn_prefix_result = generate_turn_prefix_summary(
-            turn_prefix_messages,
-            model,
-            api_key,
-            headers,
-            env,
-            signal.clone(),
-            thinking_level,
-            stream_fn.clone(),
-            retry,
-            callbacks,
-            session_id,
-            custom_instructions,
-        )
-        .await?;
+        let turn_prefix_result = generate_turn_prefix_summary(turn_prefix_messages, request, custom_instructions).await?;
         // Merge into single summary
-        summary = format!(
+        let summary = format!(
             "{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{}",
             turn_prefix_result.text
         );
-        summary_usage = match history_usage {
+        let summary_usage = match history_usage {
             Some(history_usage) => combine_usage(&history_usage, &turn_prefix_result.usage),
             None => turn_prefix_result.usage,
         };
+        Ok((summary, summary_usage))
     } else {
         // Just generate history summary
-        let result = generate_summary_with_usage(
-            messages_to_summarize,
-            model,
-            None,
-            api_key,
-            headers,
-            signal.clone(),
-            custom_instructions,
-            previous_summary.as_deref(),
-            thinking_level,
-            stream_fn.clone(),
-            env,
-            retry,
-            callbacks,
-            session_id,
-        )
-        .await?;
-        summary = result.text;
-        summary_usage = result.usage;
+        let result = history_summary().await?;
+        Ok((result.text, result.usage))
     }
+}
+
+/// Append the file lists to `summary` and build the result.
+fn finish_compaction_result(
+    preparation: &CompactionPreparation,
+    mut summary: String,
+    summary_usage: Usage,
+) -> anyhow::Result<CompactionResult> {
+    let CompactionPreparation {
+        first_kept_entry_id,
+        tokens_before,
+        file_ops,
+        ..
+    } = preparation;
 
     // Compute file lists and append to summary
     let lists = compute_file_lists(file_ops);
@@ -1257,19 +1436,9 @@ pub async fn compact(
 }
 
 /// Generate a summary for a turn prefix (when splitting a turn).
-#[allow(clippy::too_many_arguments)]
 async fn generate_turn_prefix_summary(
     messages: &[AgentMessage],
-    model: &Model,
-    api_key: Option<&str>,
-    headers: Option<&IndexMap<String, String>>,
-    env: Option<&IndexMap<String, String>>,
-    signal: Option<CancellationToken>,
-    thinking_level: Option<ThinkingLevel>,
-    stream_fn: Option<StreamFn>,
-    retry: Option<&RetryPolicy>,
-    callbacks: Option<&RetryCallbacks>,
-    session_id: Option<&str>,
+    request: &SummaryRequest<'_>,
     custom_instructions: Option<&str>,
 ) -> anyhow::Result<GenerateSummaryWithUsageResult> {
     let llm_messages = convert_to_llm(messages);
@@ -1281,20 +1450,12 @@ async fn generate_turn_prefix_summary(
     }
 
     let response = complete_summarization(
-        model,
+        request.model,
         build_summarization_context(prompt_text),
-        create_summarization_options(
-            model,
-            api_key,
-            headers,
-            env,
-            signal.as_ref(),
-            thinking_level,
-            session_id,
-        ),
-        stream_fn,
-        retry,
-        callbacks,
+        request.options(),
+        request.stream_fn.clone(),
+        request.retry,
+        request.callbacks,
     )
     .await?;
 
