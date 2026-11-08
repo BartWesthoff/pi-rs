@@ -12,13 +12,17 @@ const ai = (fn, ...args) => u(call("ai", { fn, args }));
 
 const RUST_CALLBACK_OPTIONS = new Set(["onPayload", "onResponse", "onProviderStreamEvent"]);
 
-/** Request options for Rust: the signal as a token; supported callbacks stay functions. */
+/**
+ * Request options for Rust: the signal as a token; supported callbacks stay functions.
+ * `fetch` becomes a handle marker so provider HTTP can run through it (rust.rs forwards it to
+ * the transport bridge), instead of being dropped as an unsupported function.
+ */
 export function optionsToRust(options) {
 	if (!options) return null;
 	const out = { ...options };
 	if (options.signal) out.signal = tokenFor(options.signal);
 	for (const [key, value] of Object.entries(out)) {
-		if (typeof value === "function" && !RUST_CALLBACK_OPTIONS.has(key)) delete out[key];
+		if (typeof value === "function" && !RUST_CALLBACK_OPTIONS.has(key) && key !== "fetch") delete out[key];
 		if (value === undefined) delete out[key];
 	}
 	return out;

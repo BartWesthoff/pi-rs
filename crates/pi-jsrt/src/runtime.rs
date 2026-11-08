@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::ThreadId;
 use std::time::Instant;
@@ -172,6 +172,9 @@ pub(crate) struct Shared {
     pub(crate) cwd: PathBuf,
     /// Wakes the JS thread out of `Atomics.wait` on shutdown.
     atomics: Mutex<AtomicsGate>,
+    /// `globalThis.fetch` is an extension patch (`ops.fetchPatched`), so provider HTTP can be
+    /// routed through it. Read per request, written once per patch.
+    pub(crate) fetch_patched: AtomicBool,
 }
 
 /// Detaches the engine from [`Shared::interrupt_atomics`] when dropped.
@@ -432,6 +435,7 @@ impl JsRuntime {
             env,
             cwd: cwd.clone(),
             atomics: Mutex::default(),
+            fetch_patched: AtomicBool::new(false),
         });
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -489,6 +493,12 @@ impl JsRuntime {
     /// The tokio handle used by this runtime for async work.
     pub fn tokio(&self) -> &tokio::runtime::Handle {
         &self.inner.tokio
+    }
+
+    /// Whether an extension has replaced `globalThis.fetch` (a patch, not the built-in). Cheap
+    /// enough to read per request, so provider HTTP only crosses into JS when it must.
+    pub fn fetch_patched(&self) -> bool {
+        self.inner.shared.fetch_patched.load(Ordering::Relaxed)
     }
 
     /// Whether the current thread is the JS thread.

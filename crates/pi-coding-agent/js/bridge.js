@@ -1916,3 +1916,89 @@ export async function invokeRoute(route, request, ctxId) {
 	if (ctxId === null || ctxId === undefined) return await route(rest);
 	return await route(rest, makeContext(ctxId, "base"));
 }
+
+// ---------------------------------------------------------------------------
+// Provider HTTP through the current `fetch` (see extensions/js/transport.rs)
+// ---------------------------------------------------------------------------
+
+let hostFetchIds = 0;
+const hostFetches = new Map();
+
+function bytesFromBase64(text) {
+	const raw = atob(text);
+	const out = new Uint8Array(raw.length);
+	for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+	return out;
+}
+
+function bytesToBase64(bytes) {
+	let text = "";
+	for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+	return btoa(text);
+}
+
+/** Start a provider request: `{url, method, headers, body, signal, fetch}`. Returns the head. */
+export async function hostFetchStart(request) {
+	const { url, method, headers, body, signal, fetch: custom } = request;
+	const call = custom ?? globalThis.fetch;
+	const init = { method };
+	if (headers.length > 0) init.headers = headers;
+	if (signal) init.signal = signalFor(signal.id, signal.aborted);
+	if (body !== null && body !== undefined) {
+		init.body = bytesFromBase64(body);
+		init.duplex = "half";
+	}
+	let response;
+	try {
+		response = await call(url, init);
+	} catch (error) {
+		throw new Error(String(error?.message ?? error));
+	}
+	const head = {
+		status: response.status,
+		statusText: response.statusText,
+		// Flat [name, value, ...]: the Rust side chunks it back into pairs.
+		headers: [...response.headers].flatMap(([name, value]) => [name, value]),
+	};
+	// A body the built-in fetch produced itself hands its Rust stream over, uncopied.
+	if (response.__piFetchId !== undefined) {
+		head.nativeId = response.__piFetchId;
+		return head;
+	}
+	if (response.body) {
+		const id = ++hostFetchIds;
+		hostFetches.set(id, response.body.getReader());
+		head.id = id;
+	}
+	return head;
+}
+
+/** The next chunk of a JavaScript response body as base64, `null` at the end. */
+export async function hostFetchRead(id) {
+	const reader = hostFetches.get(id);
+	if (!reader) return null;
+	let next;
+	try {
+		next = await reader.read();
+	} catch (error) {
+		hostFetches.delete(id);
+		throw new Error(String(error?.message ?? error));
+	}
+	if (next.done) {
+		hostFetches.delete(id);
+		return null;
+	}
+	return bytesToBase64(next.value);
+}
+
+/** Stop reading a response body (the consumer went away or aborted). */
+export async function hostFetchCancel(id) {
+	const reader = hostFetches.get(id);
+	hostFetches.delete(id);
+	try {
+		await reader?.cancel();
+	} catch {
+		// The reader may already be errored or released.
+	}
+	return null;
+}

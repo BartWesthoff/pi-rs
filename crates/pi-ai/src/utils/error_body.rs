@@ -134,12 +134,21 @@ impl ProviderHttpError {
     /// Map a [`TransportError`](crate::transport::TransportError) to the SDK's connection error
     /// messages.
     pub fn from_transport(error: &crate::transport::TransportError) -> Self {
-        if error.is_timeout() {
-            Self::timed_out()
-        } else {
-            // Like the SDKs' APIConnectionError: the cause is not part of the message.
-            Self::connection("Connection error.")
+        if let crate::transport::TransportError::Reqwest(error) = error {
+            return Self::from_reqwest(error);
         }
+        if error.is_timeout() {
+            return Self::timed_out();
+        }
+        // A rejected JavaScript `fetch` (an extension's patch) reports its own message, as the
+        // SDK does; a network failure keeps the bare SDK wording.
+        if let crate::transport::TransportError::Network(e) = error
+            && let Some(message) = e.js_fetch_message()
+        {
+            return Self::connection(message);
+        }
+        // Like the SDKs' APIConnectionError: the cause is not part of the message.
+        Self::connection("Connection error.")
     }
 
     /// `true` for the loopback "connection refused" error of [`Self::from_reqwest`]: no local

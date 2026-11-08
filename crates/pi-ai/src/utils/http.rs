@@ -299,6 +299,17 @@ pub struct NetworkError {
     pub message: String,
 }
 
+/// `NetworkError::code` of a rejection from a JavaScript `fetch` (an extension's `fetch` patch):
+/// its message is the thrown error's, reported as the provider error like the TS SDK does.
+pub const JS_FETCH_CODE: &str = "ERR_PI_JS_FETCH";
+
+impl NetworkError {
+    /// The rejection message when this came from a JavaScript `fetch` (see [`JS_FETCH_CODE`]).
+    pub fn js_fetch_message(&self) -> Option<&str> {
+        (self.code == Some(JS_FETCH_CODE)).then_some(self.message.as_str())
+    }
+}
+
 impl FetchFailed {
     pub fn new(error: &reqwest::Error) -> Self {
         Self { cause: NetworkError::from_reqwest(error) }

@@ -23,6 +23,7 @@ mod messages;
 mod native;
 mod provider;
 mod sdk;
+mod transport;
 mod tui_helpers;
 
 use std::collections::HashMap;
@@ -300,7 +301,8 @@ impl Bridge {
                         let _ = glue.call_method("abortSignal", vec![json!(id)]).await;
                     }
                     _ = done2.cancelled() => {
-                        let _ = glue.call_method("releaseSignal", vec![json!(id)]).await;
+                        let operation = if token.is_cancelled() { "abortSignal" } else { "releaseSignal" };
+                        let _ = glue.call_method(operation, vec![json!(id)]).await;
                     }
                 }
             });
@@ -405,41 +407,50 @@ struct SharedHost {
     host: Arc<JsExtensionHost>,
 }
 
-static SHARED: LazyLock<Mutex<Option<SharedHost>>> = LazyLock::new(|| Mutex::new(None));
+/// One host per working directory: a process may run several sessions (an RPC server, tests),
+/// and each needs its own extension runtime.
+static SHARED: LazyLock<Mutex<Vec<SharedHost>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl JsExtensionHost {
     /// The host shared by extension loads for `cwd` in the current cache generation.
     pub async fn shared(cwd: &str) -> anyhow::Result<Arc<JsExtensionHost>> {
         let generation = GENERATION.load(Ordering::SeqCst);
-        {
-            let shared = SHARED.lock();
-            if let Some(s) = &*shared
-                && s.cwd == cwd
-                && s.generation == generation
-            {
-                return Ok(s.host.clone());
-            }
+        if let Some(s) = SHARED.lock().iter().find(|s| s.cwd == cwd && s.generation == generation) {
+            return Ok(s.host.clone());
         }
         let host = Arc::new(JsExtensionHost::new(cwd).await?);
         let mut shared = SHARED.lock();
-        if let Some(s) = &*shared
-            && s.cwd == cwd
-            && s.generation == generation
-        {
+        if let Some(s) = shared.iter().find(|s| s.cwd == cwd && s.generation == generation) {
             return Ok(s.host.clone());
         }
         if GENERATION.load(Ordering::SeqCst) == generation {
-            *shared = Some(SharedHost { cwd: cwd.to_string(), generation, host: host.clone() });
+            // A cache clear elsewhere does not invalidate this cwd's live runtime: its sessions
+            // keep using it until they reload, which replaces the entry.
+            shared.retain(|s| s.cwd != cwd);
+            shared.push(SharedHost { cwd: cwd.to_string(), generation, host: host.clone() });
         }
         Ok(host)
+    }
+
+    /// The extension `fetch` transport for provider HTTP, when an extension replaced
+    /// `globalThis.fetch` (a patch, not the built-in or undici's own). `None` keeps provider
+    /// requests on the Rust client, so an unpatched runtime never calls into JavaScript.
+    pub fn fetch_transport(cwd: &str) -> Option<std::sync::Arc<dyn pi_ai::transport::HttpTransport>> {
+        // No generation check: the host a session's extensions were loaded into stays the one
+        // serving that session, even after another cwd clears the extension cache.
+        let host = SHARED.lock().iter().find(|s| s.cwd == cwd).map(|s| s.host.clone())?;
+        host.bridge.rt.fetch_patched().then(|| {
+            std::sync::Arc::new(transport::JsFetchTransport::new(host.bridge.clone(), None))
+                as std::sync::Arc<dyn pi_ai::transport::HttpTransport>
+        })
     }
 
     /// Forget the shared host: the next load starts a new JS runtime. Extensions loaded from the
     /// previous runtime keep it alive until they are dropped.
     pub fn reset_shared() {
+        // Each cwd's next load starts a fresh runtime; live sessions keep theirs.
         GENERATION.fetch_add(1, Ordering::SeqCst);
-        *SHARED.lock() = None;
     }
 
     /// Start a new JS runtime with pi's virtual modules.

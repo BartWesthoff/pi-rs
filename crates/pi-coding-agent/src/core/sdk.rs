@@ -12,6 +12,7 @@ use crate::core::cache_warmer::{
 };
 use crate::core::client_identity::get_client_identity;
 use crate::core::defaults::DEFAULT_THINKING_LEVEL;
+use crate::core::extensions::js::JsExtensionHost;
 use crate::core::extensions::types::{AfterProviderResponseEvent, ExtensionEvent, ProviderStreamEvent};
 use crate::core::mcp_servers::create_tool_name_matcher;
 use crate::core::messages::convert_to_llm;
@@ -448,6 +449,7 @@ pub async fn create_agent_session(
 
     let request_settings = settings_manager.clone();
     let request_runner_ref = extension_runner_ref.clone();
+    let request_cwd = cwd.clone();
     let build_request_options = move |options: SimpleStreamOptions| -> ModelsRequestOptions {
         let provider_retry_settings = request_settings.get_provider_retry_settings();
         let http_idle_timeout_ms = request_settings.get_http_idle_timeout_ms().unwrap_or(0);
@@ -480,6 +482,11 @@ pub async fn create_agent_session(
             .or(Some(provider_retry_settings.max_retry_delay_ms.max(0) as u64));
         // Replaces the agent loop's default identity; read per request so telemetry changes apply at once.
         options.identity = Some(get_client_identity(request_settings.clone()));
+        // An extension's `fetch` patch takes over provider HTTP (PKGP-11); `None` when unpatched,
+        // so the Rust client stays in charge and JavaScript is not called at all.
+        if options.http_transport.is_none() {
+            options.http_transport = JsExtensionHost::fetch_transport(&request_cwd);
+        }
         let header_runner = request_runner_ref.current();
         let transform_headers: TransformHeadersFn = Arc::new(move |headers: ProviderHeaders| {
             let runner = header_runner.clone();

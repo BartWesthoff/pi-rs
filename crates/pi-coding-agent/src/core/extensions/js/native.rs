@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use super::api::{opt, str_arg};
 use super::provider::{register_stream, stream_options_from_json, stream_options_to_json};
 use super::{AsyncRustCallback, Bridge, SignalGuard, tokio_spawn};
+use super::transport::JsFetchTransport;
 use crate::core::extensions::types::{ProviderConfig, ProviderOAuthConfig, RefreshModelsFn, StreamSimpleFn};
 
 /// A Rust object kept for JavaScript proxies.
@@ -169,6 +170,10 @@ pub(crate) fn options_from_js(bridge: &Arc<Bridge>, value: &Value) -> StreamOpti
     options.identity = handles.get("identity").and_then(|v| serde_json::from_value(v.clone()).ok());
     options.deferred = handles.get("deferred").and_then(|v| serde_json::from_value(v.clone()).ok());
     options.websocket_connect_timeout_ms = handles.get("websocketConnectTimeoutMs").and_then(Value::as_u64);
+    // `options.fetch` from JS: provider HTTP through that function, like TS pi-ai.
+    if let Some(fetch) = handles.get("fetch").and_then(|v| bridge.handle(v)) {
+        options.http_transport = Some(Arc::new(JsFetchTransport::new(bridge.clone(), Some(fetch))));
+    }
     if let Some(h) = handles.get("onPayload").and_then(|v| bridge.handle(v)) {
         let b = bridge.clone();
         options.on_payload = Some(Arc::new(move |payload: Value, model: Model| {

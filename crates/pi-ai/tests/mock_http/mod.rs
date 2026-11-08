@@ -19,10 +19,16 @@ pub struct Request {
 
 impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
     pub fn header_count(&self, name: &str) -> usize {
-        self.headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name)).count()
+        self.headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .count()
     }
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -108,7 +114,9 @@ pub struct MockServer {
 
 impl MockServer {
     /// Serve requests with `handler(request, index)`.
-    pub async fn start(handler: impl Fn(&Request, usize) -> Response + Send + Sync + 'static) -> MockServer {
+    pub async fn start(
+        handler: impl Fn(&Request, usize) -> Response + Send + Sync + 'static,
+    ) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests: Arc<Mutex<Vec<Request>>> = Arc::default();
@@ -116,7 +124,9 @@ impl MockServer {
         let captured = requests.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((socket, _)) = listener.accept().await else { return };
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
                 let handler = handler.clone();
                 let captured = captured.clone();
                 tokio::spawn(async move {
@@ -141,7 +151,11 @@ impl MockServer {
     }
 }
 
-async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc<Mutex<Vec<Request>>>) -> std::io::Result<()> {
+async fn serve_connection(
+    mut socket: TcpStream,
+    handler: Handler,
+    captured: Arc<Mutex<Vec<Request>>>,
+) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 16384];
     let header_end = loop {
@@ -161,7 +175,10 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
     let headers: Vec<(String, String)> = lines
-        .filter_map(|line| line.split_once(':').map(|(n, v)| (n.trim().to_string(), v.trim().to_string())))
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
+        })
         .collect();
     let content_length = headers
         .iter()
@@ -176,7 +193,12 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
         }
         body.extend_from_slice(&chunk[..n]);
     }
-    let request = Request { method, path, headers, body };
+    let request = Request {
+        method,
+        path,
+        headers,
+        body,
+    };
     let index = {
         let mut guard = captured.lock();
         guard.push(request.clone());
@@ -197,12 +219,18 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
         503 => "Service Unavailable",
         _ => "Status",
     };
-    let mut head = format!("HTTP/1.1 {} {reason}\r\nconnection: close\r\n", response.status);
+    let mut head = format!(
+        "HTTP/1.1 {} {reason}\r\nconnection: close\r\n",
+        response.status
+    );
     for (name, value) in &response.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     if response.chunks.len() == 1 && !response.truncate {
-        head.push_str(&format!("content-length: {}\r\n\r\n", response.chunks[0].len()));
+        head.push_str(&format!(
+            "content-length: {}\r\n\r\n",
+            response.chunks[0].len()
+        ));
         socket.write_all(head.as_bytes()).await?;
         socket.write_all(&response.chunks[0]).await?;
     } else {
@@ -212,7 +240,9 @@ async fn serve_connection(mut socket: TcpStream, handler: Handler, captured: Arc
             if response.chunk_delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(response.chunk_delay_ms)).await;
             }
-            socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await?;
+            socket
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await?;
             socket.write_all(chunk).await?;
             socket.write_all(b"\r\n").await?;
             socket.flush().await?;

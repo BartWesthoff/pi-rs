@@ -985,16 +985,26 @@ async function fetch(input, init = {}) {
         cancel() {
           ops.fetchCancel(id);
         },
-      });
+      },
+      // Pull only when the body is read, so a host taking the body over (see `__piFetchId`)
+      // finds it untouched instead of already drained by a prefetching stream.
+      { highWaterMark: 0 });
   if (nullBody) ops.fetchCancel(id);
   const response = new Response(null, { status: Math.max(200, head.status), statusText: head.statusText, headers });
   response.status = head.status;
   response[kBody] = { stream, used: false, streamObj: null, bytes: null };
+  // A host may take the body over instead of copying it through JS (see `take_fetch_body`).
+  Object.defineProperty(response, "__piFetchId", { value: id, configurable: true });
   response.url = head.url;
   response.redirected = head.url !== url.href;
   response.type = "basic";
   return response;
 }
+
+// The pristine implementation, so a host can tell a patch from the real thing (and extensions may
+// keep calling it). Also the value a "native" tag marks for modules that re-export it.
+ops.nativeFetch = fetch;
+Object.defineProperty(fetch, "__piNativeFetch", { value: true, configurable: true });
 
 for (const [name, value] of Object.entries({
   ReadableStream,

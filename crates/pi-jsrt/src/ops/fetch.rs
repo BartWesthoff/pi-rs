@@ -27,11 +27,13 @@ use crate::error::{Error, JsException};
 type Body = Arc<tokio::sync::Mutex<Option<reqwest::Response>>>;
 type Upload = mpsc::Sender<Result<Vec<u8>, std::io::Error>>;
 
-static BODIES: LazyLock<Mutex<HashMap<u64, (Body, Option<Duration>)>>> = LazyLock::new(Default::default);
+static BODIES: LazyLock<Mutex<HashMap<u64, (Body, Option<Duration>)>>> =
+    LazyLock::new(Default::default);
 static TOKENS: LazyLock<Mutex<HashMap<u64, CancellationToken>>> = LazyLock::new(Default::default);
 static UPLOADS: LazyLock<Mutex<HashMap<u64, Upload>>> = LazyLock::new(Default::default);
 /// Clients by `(redirect mode, connection settings)`; undici likewise pools per dispatcher.
-static CLIENTS: LazyLock<Mutex<HashMap<String, (reqwest::Client, AuthSlot)>>> = LazyLock::new(Default::default);
+static CLIENTS: LazyLock<Mutex<HashMap<String, (reqwest::Client, AuthSlot)>>> =
+    LazyLock::new(Default::default);
 /// Loopback forwarders that tunnel plain-HTTP requests through a proxy with CONNECT.
 static TUNNELS: LazyLock<Mutex<HashMap<String, u16>>> = LazyLock::new(Default::default);
 
@@ -70,11 +72,21 @@ struct ProxySpec {
 
 /// A `fetch` failure: the `cause` JS attaches to `TypeError: fetch failed`/`terminated`.
 fn cause(name: &str, message: String, code: Option<&str>) -> Error {
-    Error::Js(JsException { name: name.into(), message, stack: None, code: code.map(Into::into) })
+    Error::Js(JsException {
+        name: name.into(),
+        message,
+        stack: None,
+        code: code.map(Into::into),
+    })
 }
 
 fn type_error(message: String) -> Error {
-    Error::Js(JsException { name: "TypeError".into(), message, stack: None, code: None })
+    Error::Js(JsException {
+        name: "TypeError".into(),
+        message,
+        stack: None,
+        code: None,
+    })
 }
 
 fn abort_error() -> Error {
@@ -96,7 +108,11 @@ fn timeout(ms: f64) -> Option<Duration> {
 
 /// `host:port` of the URL a connection goes to.
 fn address(url: &reqwest::Url) -> String {
-    let host = url.host_str().unwrap_or("localhost").trim_start_matches('[').trim_end_matches(']');
+    let host = url
+        .host_str()
+        .unwrap_or("localhost")
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     match url.port_or_known_default() {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
@@ -107,12 +123,25 @@ fn address(url: &reqwest::Url) -> String {
 /// `getaddrinfo ENOTFOUND ...`, OpenSSL certificate codes, ...).
 fn network_cause(error: &reqwest::Error, spec: &ClientSpec, auth: &AuthSlot) -> Error {
     let url = error.url();
-    let host = url.and_then(|u| u.host_str()).unwrap_or("localhost").trim_start_matches('[').trim_end_matches(']').to_string();
+    let host = url
+        .and_then(|u| u.host_str())
+        .unwrap_or("localhost")
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
     // A configured proxy is where the connection went.
-    let proxy = spec.proxy.as_ref().and_then(|p| reqwest::Url::parse(&p.uri).ok());
+    let proxy = spec
+        .proxy
+        .as_ref()
+        .and_then(|p| reqwest::Url::parse(&p.uri).ok());
     let connect_url = proxy.as_ref().or(url);
-    let connect_host = connect_url.and_then(|u| u.host_str()).map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string()).unwrap_or(host);
-    let addr = connect_url.map(address).unwrap_or_else(|| connect_host.clone());
+    let connect_host = connect_url
+        .and_then(|u| u.host_str())
+        .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string())
+        .unwrap_or(host);
+    let addr = connect_url
+        .map(address)
+        .unwrap_or_else(|| connect_host.clone());
     let mut texts = Vec::new();
     let mut io_kind = None;
     let mut tls = false;
@@ -126,38 +155,70 @@ fn network_cause(error: &reqwest::Error, spec: &ClientSpec, auth: &AuthSlot) -> 
         source = current.source();
     }
     let all = texts.join(": ").to_ascii_lowercase();
-    if (tls || all.contains("certificate")) && let Some((code, message)) = auth.lock().expect("lock poisoned").take() {
+    if (tls || all.contains("certificate"))
+        && let Some((code, message)) = auth.lock().expect("lock poisoned").take()
+    {
         return cause("Error", message, Some(&code));
     }
     if all.contains("dns error") || all.contains("failed to lookup address") {
-        return cause("Error", format!("getaddrinfo ENOTFOUND {connect_host}"), Some("ENOTFOUND"));
+        return cause(
+            "Error",
+            format!("getaddrinfo ENOTFOUND {connect_host}"),
+            Some("ENOTFOUND"),
+        );
     }
     if spec.connect_timeout > 0 && error.is_connect() && error.is_timeout() {
         return cause(
             "ConnectTimeoutError",
-            format!("Connect Timeout Error (attempted address: {addr}, timeout: {}ms)", spec.connect_timeout),
+            format!(
+                "Connect Timeout Error (attempted address: {addr}, timeout: {}ms)",
+                spec.connect_timeout
+            ),
             Some("UND_ERR_CONNECT_TIMEOUT"),
         );
     }
     use std::io::ErrorKind;
     let errno = |code: &str, message: String| cause("Error", message, Some(code));
     match io_kind {
-        Some(ErrorKind::ConnectionRefused) => return errno("ECONNREFUSED", format!("connect ECONNREFUSED {addr}")),
-        Some(ErrorKind::TimedOut) => return errno("ETIMEDOUT", format!("connect ETIMEDOUT {addr}")),
+        Some(ErrorKind::ConnectionRefused) => {
+            return errno("ECONNREFUSED", format!("connect ECONNREFUSED {addr}"));
+        }
+        Some(ErrorKind::TimedOut) => {
+            return errno("ETIMEDOUT", format!("connect ETIMEDOUT {addr}"));
+        }
         Some(ErrorKind::ConnectionReset) => return errno("ECONNRESET", "read ECONNRESET".into()),
-        Some(ErrorKind::HostUnreachable) => return errno("EHOSTUNREACH", format!("connect EHOSTUNREACH {addr}")),
-        Some(ErrorKind::NetworkUnreachable) => return errno("ENETUNREACH", format!("connect ENETUNREACH {addr}")),
+        Some(ErrorKind::HostUnreachable) => {
+            return errno("EHOSTUNREACH", format!("connect EHOSTUNREACH {addr}"));
+        }
+        Some(ErrorKind::NetworkUnreachable) => {
+            return errno("ENETUNREACH", format!("connect ENETUNREACH {addr}"));
+        }
         Some(ErrorKind::BrokenPipe) => return errno("EPIPE", "write EPIPE".into()),
         _ => {}
     }
-    if all.contains("connection closed") || all.contains("incomplete message") || all.contains("unexpected eof") {
-        return cause("SocketError", "other side closed".into(), Some("UND_ERR_SOCKET"));
+    if all.contains("connection closed")
+        || all.contains("incomplete message")
+        || all.contains("unexpected eof")
+    {
+        return cause(
+            "SocketError",
+            "other side closed".into(),
+            Some("UND_ERR_SOCKET"),
+        );
     }
-    cause("Error", texts.pop().unwrap_or_else(|| error.to_string()), None)
+    cause(
+        "Error",
+        texts.pop().unwrap_or_else(|| error.to_string()),
+        None,
+    )
 }
 
 /// A reqwest client for `spec`, built once per distinct settings.
-fn client(key: &str, spec: &ClientSpec, follow: bool) -> Result<(reqwest::Client, AuthSlot), Error> {
+fn client(
+    key: &str,
+    spec: &ClientSpec,
+    follow: bool,
+) -> Result<(reqwest::Client, AuthSlot), Error> {
     if let Some(c) = CLIENTS.lock().get(key) {
         return Ok(c.clone());
     }
@@ -167,11 +228,22 @@ fn client(key: &str, spec: &ClientSpec, follow: bool) -> Result<(reqwest::Client
         key: spec.key.clone(),
         passphrase: spec.passphrase.clone().map(String::into_bytes),
         reject_unauthorized: spec.reject_unauthorized.unwrap_or(true),
-        alpn: if spec.allow_h2 { vec![b"h2".to_vec(), b"http/1.1".to_vec()] } else { vec![b"http/1.1".to_vec()] },
+        alpn: if spec.allow_h2 {
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        } else {
+            vec![b"http/1.1".to_vec()]
+        },
     };
-    let (tls, auth) = fetch_client_config(&tls).map_err(|e| cause("Error", e, Some("ERR_TLS_INVALID_CONTEXT")))?;
-    let policy = if follow { reqwest::redirect::Policy::limited(20) } else { reqwest::redirect::Policy::none() };
-    let mut builder = reqwest::Client::builder().redirect(policy).use_preconfigured_tls(tls);
+    let (tls, auth) = fetch_client_config(&tls)
+        .map_err(|e| cause("Error", e, Some("ERR_TLS_INVALID_CONTEXT")))?;
+    let policy = if follow {
+        reqwest::redirect::Policy::limited(20)
+    } else {
+        reqwest::redirect::Policy::none()
+    };
+    let mut builder = reqwest::Client::builder()
+        .redirect(policy)
+        .use_preconfigured_tls(tls);
     // undici speaks HTTP/1.1 unless the dispatcher sets `allowH2`.
     if !spec.allow_h2 {
         builder = builder.http1_only();
@@ -187,7 +259,10 @@ fn client(key: &str, spec: &ClientSpec, follow: bool) -> Result<(reqwest::Client
             let mut headers = reqwest::header::HeaderMap::new();
             let mut auth_header = None;
             for (k, v) in &p.headers {
-                let (Ok(name), Ok(value)) = (reqwest::header::HeaderName::from_bytes(k.as_bytes()), reqwest::header::HeaderValue::from_str(v)) else {
+                let (Ok(name), Ok(value)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(v),
+                ) else {
                     continue;
                 };
                 if name == reqwest::header::PROXY_AUTHORIZATION {
@@ -221,8 +296,12 @@ fn client(key: &str, spec: &ClientSpec, follow: bool) -> Result<(reqwest::Client
             }
         }
     }
-    let client = builder.build().map_err(|e| cause("Error", e.to_string(), None))?;
-    CLIENTS.lock().insert(key.to_string(), (client.clone(), auth.clone()));
+    let client = builder
+        .build()
+        .map_err(|e| cause("Error", e.to_string(), None))?;
+    CLIENTS
+        .lock()
+        .insert(key.to_string(), (client.clone(), auth.clone()));
     Ok((client, auth))
 }
 
@@ -236,18 +315,24 @@ fn tunnel_forwarder(proxy: &ProxySpec) -> std::io::Result<u16> {
     }
     let upstream = reqwest::Url::parse(&proxy.uri).map_err(std::io::Error::other)?;
     let upstream = address(&upstream);
-    let headers: String = proxy.headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+    let headers: String = proxy
+        .headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    std::thread::Builder::new().name("fetch-tunnel".into()).spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let upstream = upstream.clone();
-            let headers = headers.clone();
-            std::thread::spawn(move || {
-                let _ = forward_through_tunnel(conn, &upstream, &headers);
-            });
-        }
-    })?;
+    std::thread::Builder::new()
+        .name("fetch-tunnel".into())
+        .spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let upstream = upstream.clone();
+                let headers = headers.clone();
+                std::thread::spawn(move || {
+                    let _ = forward_through_tunnel(conn, &upstream, &headers);
+                });
+            }
+        })?;
     TUNNELS.lock().insert(key, port);
     Ok(port)
 }
@@ -258,7 +343,8 @@ fn forward_through_tunnel(client: TcpStream, upstream: &str, headers: &str) -> s
     reader.read_line(&mut line)?;
     // `GET http://host:port/path HTTP/1.1`
     let mut parts = line.trim_end().splitn(3, ' ');
-    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next()) else {
+    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
+    else {
         return Ok(());
     };
     let url = reqwest::Url::parse(target).map_err(std::io::Error::other)?;
@@ -268,7 +354,10 @@ fn forward_through_tunnel(client: TcpStream, upstream: &str, headers: &str) -> s
         None => url.path().to_string(),
     };
     let mut proxy = TcpStream::connect(upstream)?;
-    write!(proxy, "CONNECT {authority} HTTP/1.1\r\nhost: {authority}\r\n{headers}\r\n")?;
+    write!(
+        proxy,
+        "CONNECT {authority} HTTP/1.1\r\nhost: {authority}\r\n{headers}\r\n"
+    )?;
     let mut proxy_reader = BufReader::new(proxy.try_clone()?);
     let mut status = String::new();
     proxy_reader.read_line(&mut status)?;
@@ -281,7 +370,10 @@ fn forward_through_tunnel(client: TcpStream, upstream: &str, headers: &str) -> s
     let code = status.split(' ').nth(1).unwrap_or("");
     if code != "200" {
         let mut client = client;
-        write!(client, "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
+        write!(
+            client,
+            "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )?;
         return Ok(());
     }
     write!(proxy, "{method} {path} {version}\r\n")?;
@@ -349,11 +441,19 @@ fn op_fetch_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     let cancel = token(id);
     let fut = async move {
         let spec: ClientSpec = if settings.is_empty() {
-            ClientSpec { env_proxy: true, ..ClientSpec::default() }
+            ClientSpec {
+                env_proxy: true,
+                ..ClientSpec::default()
+            }
         } else {
-            serde_json::from_str(&settings).map_err(|e| type_error(format!("invalid dispatcher settings: {e}")))?
+            serde_json::from_str(&settings)
+                .map_err(|e| type_error(format!("invalid dispatcher settings: {e}")))?
         };
-        let (client, auth) = client(&format!("{redirect}|{settings}"), &spec, redirect == "follow")?;
+        let (client, auth) = client(
+            &format!("{redirect}|{settings}"),
+            &spec,
+            redirect == "follow",
+        )?;
         let method = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
             .map_err(|_| type_error(format!("'{method}' is not a valid HTTP method.")))?;
         let mut req = client.request(method, &url);
@@ -365,9 +465,13 @@ fn op_fetch_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
         }
         let send = async {
             match headers_timeout {
-                Some(t) => tokio::time::timeout(t, req.send())
-                    .await
-                    .map_err(|_| cause("HeadersTimeoutError", "Headers Timeout Error".into(), Some("UND_ERR_HEADERS_TIMEOUT")))?,
+                Some(t) => tokio::time::timeout(t, req.send()).await.map_err(|_| {
+                    cause(
+                        "HeadersTimeoutError",
+                        "Headers Timeout Error".into(),
+                        Some("UND_ERR_HEADERS_TIMEOUT"),
+                    )
+                })?,
                 None => req.send().await,
             }
             .map_err(|e| network_cause(&e, &spec, &auth))
@@ -394,10 +498,18 @@ fn op_fetch_start(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
             headers: resp
                 .headers()
                 .iter()
-                .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_string(),
+                        String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                    )
+                })
                 .collect(),
         };
-        BODIES.lock().insert(id, (Arc::new(tokio::sync::Mutex::new(Some(resp))), body_timeout));
+        BODIES.lock().insert(
+            id,
+            (Arc::new(tokio::sync::Mutex::new(Some(resp))), body_timeout),
+        );
         Ok(head)
     };
     Ok(engine::spawn_result(ctx, fut, move |head: Head, ctx| {
@@ -426,7 +538,11 @@ fn op_fetch_write(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     let chunk = args.get_or_undefined(1);
     if chunk.is_null_or_undefined() {
         let open = UPLOADS.lock().remove(&id).is_some();
-        return Ok(engine::spawn_result(ctx, async move { Ok(open) }, |open, _| Ok(JsValue::from(open))));
+        return Ok(engine::spawn_result(
+            ctx,
+            async move { Ok(open) },
+            |open, _| Ok(JsValue::from(open)),
+        ));
     }
     let chunk = bytes_arg(chunk, ctx)?;
     let tx = UPLOADS.lock().get(&id).cloned();
@@ -434,7 +550,9 @@ fn op_fetch_write(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
         let Some(tx) = tx else { return Ok(false) };
         Ok(tx.send(Ok(chunk)).await.is_ok())
     };
-    Ok(engine::spawn_result(ctx, fut, |ok: bool, _| Ok(JsValue::from(ok))))
+    Ok(engine::spawn_result(ctx, fut, |ok: bool, _| {
+        Ok(JsValue::from(ok))
+    }))
 }
 
 /// `ops.fetchWriteError(id, message)`: fail a streamed request body (the request errors).
@@ -453,19 +571,37 @@ fn op_fetch_read(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
     let body = BODIES.lock().get(&id).cloned();
     let cancel = token(id);
     let fut = async move {
-        let Some((body, idle)) = body else { return Ok(None) };
+        let Some((body, idle)) = body else {
+            return Ok(None);
+        };
         let mut guard = body.lock().await;
-        let Some(resp) = guard.as_mut() else { return Ok(None) };
+        let Some(resp) = guard.as_mut() else {
+            return Ok(None);
+        };
         let read = async {
             let chunk = match idle {
-                Some(t) => tokio::time::timeout(t, resp.chunk())
-                    .await
-                    .map_err(|_| cause("BodyTimeoutError", "Body Timeout Error".into(), Some("UND_ERR_BODY_TIMEOUT")))?,
+                Some(t) => tokio::time::timeout(t, resp.chunk()).await.map_err(|_| {
+                    cause(
+                        "BodyTimeoutError",
+                        "Body Timeout Error".into(),
+                        Some("UND_ERR_BODY_TIMEOUT"),
+                    )
+                })?,
                 None => resp.chunk().await,
             };
             chunk.map_err(|e| {
-                let text = std::error::Error::source(&e).map(|s| s.to_string()).unwrap_or_else(|| e.to_string());
-                cause("SocketError", if text.is_empty() { "other side closed".into() } else { text }, Some("UND_ERR_SOCKET"))
+                let text = std::error::Error::source(&e)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| e.to_string());
+                cause(
+                    "SocketError",
+                    if text.is_empty() {
+                        "other side closed".into()
+                    } else {
+                        text
+                    },
+                    Some("UND_ERR_SOCKET"),
+                )
             })
         };
         let chunk = tokio::select! {
@@ -483,10 +619,14 @@ fn op_fetch_read(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
             }
         }
     };
-    Ok(engine::spawn_result(ctx, fut, |chunk: Option<Vec<u8>>, ctx| match chunk {
-        Some(c) => bytes_to_js(&c, ctx),
-        None => Ok(JsValue::null()),
-    }))
+    Ok(engine::spawn_result(
+        ctx,
+        fut,
+        |chunk: Option<Vec<u8>>, ctx| match chunk {
+            Some(c) => bytes_to_js(&c, ctx),
+            None => Ok(JsValue::null()),
+        },
+    ))
 }
 
 /// `ops.fetchCancel(id)`: abort an in-flight request / body and free it.
@@ -504,6 +644,130 @@ fn op_fetch_id(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
     Ok(JsValue::from(engine::state(ctx).next_id() as f64))
 }
 
+/// Why a [`NativeBody`] read failed, worded like the JS-side `fetch` failure it mirrors.
+pub struct NativeBodyError {
+    /// Node-compatible error code, when available.
+    pub code: Option<String>,
+    /// Human-readable error message.
+    pub message: String,
+}
+
+/// A response body of the built-in `fetch`, read from Rust.
+///
+/// A host that swapped in a transport of its own (pi's JavaScript `fetch` bridge) takes an
+/// untouched response over with [`take_native_body`] instead of copying its chunks through JS.
+pub struct NativeBody {
+    id: u64,
+    body: Body,
+    idle: Option<Duration>,
+    cancel: CancellationToken,
+}
+
+impl NativeBody {
+    /// The next chunk, `None` at the end of the body.
+    pub async fn next_chunk(&mut self) -> Option<Result<bytes::Bytes, NativeBodyError>> {
+        let idle = self.idle;
+        let cancel = self.cancel.clone();
+        let mut guard = self.body.lock().await;
+        let resp = guard.as_mut()?;
+        let read = async {
+            match idle {
+                Some(t) => match tokio::time::timeout(t, resp.chunk()).await {
+                    Ok(chunk) => chunk.map_err(socket_error),
+                    Err(_) => Err(NativeBodyError {
+                        code: Some("UND_ERR_BODY_TIMEOUT".into()),
+                        message: "Body Timeout Error".into(),
+                    }),
+                },
+                None => resp.chunk().await.map_err(socket_error),
+            }
+        };
+        let chunk = tokio::select! {
+            c = read => c,
+            _ = cancel.cancelled() => return Some(Err(abort_body_error())),
+        };
+        match chunk {
+            Ok(Some(bytes)) => Some(Ok(bytes)),
+            // The body ended (or failed): nothing more is read from it.
+            Ok(None) => {
+                *guard = None;
+                None
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// A read failure worded like the JS `fetch` body errors it mirrors.
+fn socket_error(e: reqwest::Error) -> NativeBodyError {
+    let text = std::error::Error::source(&e)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| e.to_string());
+    NativeBodyError {
+        code: Some("UND_ERR_SOCKET".into()),
+        message: if text.is_empty() {
+            "other side closed".into()
+        } else {
+            text
+        },
+    }
+}
+
+impl Drop for NativeBody {
+    fn drop(&mut self) {
+        if let Some(t) = TOKENS.lock().remove(&self.id) {
+            t.cancel();
+        }
+        BODIES.lock().remove(&self.id);
+    }
+}
+
+fn abort_body_error() -> NativeBodyError {
+    NativeBodyError {
+        code: Some("ABORT_ERR".into()),
+        message: "The operation was aborted".into(),
+    }
+}
+
+/// Take the body of the built-in `fetch` response `id` over (the JS `Response` stops being
+/// readable). `None` once it was read, cancelled or never existed.
+pub fn take_native_body(id: u64) -> Option<NativeBody> {
+    let (body, idle) = BODIES.lock().get(&id).cloned()?;
+    let cancel = token(id);
+    Some(NativeBody {
+        id,
+        body,
+        idle,
+        cancel,
+    })
+}
+
+/// `ops.fetchPatched(patched)`: record whether `globalThis.fetch` is an extension patch, so a host
+/// can route provider HTTP through it. Called by the prelude's `fetch` accessor setter, never per
+/// request.
+fn op_fetch_patched(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let patched = args.first().and_then(JsValue::as_boolean).unwrap_or(false);
+    engine::state(ctx)
+        .shared
+        .fetch_patched
+        .store(patched, std::sync::atomic::Ordering::Relaxed);
+    if patched {
+        // Build Node's default fetch client during extension setup, not on the first provider
+        // request; the JS DEFAULT_SETTINGS JSON and client-cache key must stay in sync.
+        let spec = ClientSpec {
+            env_proxy: true,
+            connect_timeout: 10_000,
+            ..ClientSpec::default()
+        };
+        let _ = client(
+            "follow|{\"envProxy\":true,\"connectTimeout\":10000}",
+            &spec,
+            true,
+        );
+    }
+    Ok(JsValue::undefined())
+}
+
 pub(crate) const OPS: &[(&str, usize, OpFn)] = &[
     ("fetchId", 0, op_fetch_id),
     ("fetchStart", 9, op_fetch_start),
@@ -511,4 +775,5 @@ pub(crate) const OPS: &[(&str, usize, OpFn)] = &[
     ("fetchWriteError", 2, op_fetch_write_error),
     ("fetchRead", 1, op_fetch_read),
     ("fetchCancel", 1, op_fetch_cancel),
+    ("fetchPatched", 1, op_fetch_patched),
 ];

@@ -908,6 +908,32 @@ impl Loader {
         }
     }
 
+    /// Whether `path` belongs to a package named `undici`: its `fetch` is a re-implementation of
+    /// the global, not an extension patch, so a global set to it must not divert pi's requests.
+    fn in_undici_package(&self, path: &Path) -> bool {
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if let Some(pkg) = self.package_json(d) {
+                return pkg.get("name").and_then(|n| n.as_str()) == Some("undici");
+            }
+            dir = d.parent();
+        }
+        false
+    }
+
+    /// Mark undici's own `fetch` as the native implementation (`globalThis.fetch = undici.fetch`
+    /// is not a patch). The module body runs first, so a `fetch` binding it exports or re-exports
+    /// is in scope here.
+    fn tag_undici(&self, path: &Path, prepared: &mut Prepared) {
+        if prepared.format == Format::Json || !self.in_undici_package(path) {
+            return;
+        }
+        prepared.code.push_str(
+            "\n;try { if (typeof fetch === \"function\") \
+             Object.defineProperty(fetch, \"__piNativeFetch\", { value: true, configurable: true }); } catch (e) {}\n",
+        );
+    }
+
     /// Create the QuickJS module named `name` (called by QuickJS's loader hook).
     fn load_module(
         self: &Rc<Self>,
@@ -1000,7 +1026,8 @@ impl Loader {
             }
             Resolved::File(path) => {
                 let jiti = self.jiti_generation_of(name);
-                let prepared = self.prepare_file(ctx, path, jiti)?;
+                let mut prepared = self.prepare_file(ctx, path, jiti)?;
+                self.tag_undici(path, &mut prepared);
                 match prepared.format {
                     Format::Esm => {
                         compile_module(ctx, &prepared.code, name).map_err(|e| with_file(e, path))?
@@ -1157,9 +1184,10 @@ impl Loader {
             }
             Resolved::File(path) => {
                 let jiti = self.jiti_generation(generation).map(|_| generation);
-                let prepared = self
+                let mut prepared = self
                     .prepare_file(ctx, path, jiti)
                     .map_err(|e| error::to_js(&e, ctx))?;
+                self.tag_undici(path, &mut prepared);
                 match prepared.format {
                     Format::Native => {
                         let v = crate::native::require(ctx, path)?;

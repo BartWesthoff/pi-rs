@@ -4,9 +4,13 @@
 
 // Values of lazily loaded globals (see below); glue defines them through `hidden`.
 const lazyValues = Object.create(null);
+// A value assigned to `globalThis.fetch` before the fetch glue loaded (a patch) survives the glue
+// defining its own `fetch`, and stays what the global returns afterwards.
+let assignedFetch;
 const hidden = (obj, name, value) => {
   if (obj === globalThis && typeof name === "string" && lazyGlobalNames.has(name)) {
-    lazyValues[name] = value;
+    if (name === "fetch" && assignedFetch !== undefined) lazyValues[name] = assignedFetch;
+    else lazyValues[name] = value;
     return obj;
   }
   return Object.defineProperty(obj, name, { value, writable: true, configurable: true, enumerable: false });
@@ -188,6 +192,11 @@ for (const name of Object.keys(lazyGlobals)) {
     },
     set(value) {
       lazyValues[name] = value;
+      if (name === "fetch") {
+        if (!(value === ops.nativeFetch || value?.__piNativeFetch === true)) assignedFetch = value;
+        // Keep the host's per-request check in step without a call per request.
+        ops.fetchPatched(value !== ops.nativeFetch && value?.__piNativeFetch !== true);
+      }
     },
   });
 }

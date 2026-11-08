@@ -122,4 +122,7 @@ pub use runtime::{
     in_host_call, set_blocking_wait_hook, BlockingWaitHook, ExitHandler, JsCallback, JsHandle, JsObjectHandle, JsRuntime,
     OutputSink, RuntimeOptions, UncaughtHandler, VirtualModule,
 };
+/// The body of a built-in `fetch` response, for hosts that take it over instead of copying its
+/// chunks through JavaScript (pi's extension fetch bridge).
+pub use ops::fetch::{take_native_body, NativeBody, NativeBodyError};
 
